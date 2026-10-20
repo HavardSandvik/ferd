@@ -4,3 +4,7 @@ compatibility_date = "2026-10-01"
 workers_dev = true
 # Keep variables set in the Cloudflare dashboard on deploy (secrets are always kept).
 keep_vars = true
+
+# Keep Worker logs on (deploys override dashboard settings with this file).
+[observability]
+enabled = true
