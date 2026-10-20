@@ -138,7 +138,7 @@
 (() => {
   // The ADS-B feeds don't allow direct browser access, so requests go through
   // the ferd relay (relay/worker.js, a Cloudflare Worker). Set its URL here.
-  const RELAY = 'https://ferd-relay.REPLACE-ME.workers.dev';
+  const RELAY = 'https://ferd-relay.havards.workers.dev';
   const MAX_NM = 250;
   const REFRESH_MS = 15000;   // OpenSky account: 4,000 credits/day
   const MIN_GAP_MS = 4000;    // never fetch more often than this, even when panning
