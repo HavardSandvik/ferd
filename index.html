@@ -31,6 +31,10 @@
     font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
     -webkit-tap-highlight-color: transparent; }
   #map { position: fixed; inset: 0; background: var(--bg); }
+  .leaflet-tile-pane { filter: grayscale(.85) contrast(.92) brightness(1.04); }
+  @media (prefers-color-scheme: dark) {
+    .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) grayscale(.7) brightness(.82) contrast(.92); }
+  }
 
   .bar { position: fixed; z-index: 1000; left: 12px; right: 12px;
     top: calc(env(safe-area-inset-top) + 12px);
@@ -149,17 +153,11 @@
     .setView(saved ? [saved.lat, saved.lon] : [51.5, -0.12], saved ? saved.z : 9);
 
   const darkMq = matchMedia('(prefers-color-scheme: dark)');
-  let tiles;
-  function setTiles() {
-    if (tiles) map.removeLayer(tiles);
-    const style = darkMq.matches ? 'dark_all' : 'light_all';
-    tiles = L.tileLayer(`https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`, {
-      subdomains: 'abcd', maxZoom: 19,
-      attribution: '© OpenStreetMap · © CARTO · Data: OpenSky Network'
-    }).addTo(map);
-  }
-  setTiles();
-  darkMq.addEventListener?.('change', setTiles);
+  // OpenStreetMap tiles (no key). Light/dark styling is done with a CSS filter on the tile pane.
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: OpenSky Network'
+  }).addTo(map);
 
   // ---------- state ----------
   const planes = new Map();   // icao24 -> { m, d, base }
