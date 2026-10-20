@@ -6,7 +6,7 @@
 // Primary source: OpenSky Network. Add your OpenSky API client as Worker secrets
 // (Settings → Variables and Secrets): OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET.
 // Without them it tries OpenSky anonymously, which is heavily rate-limited from Cloudflare.
-// The community feeds are kept as fallbacks but usually refuse Cloudflare IPs.
+// If OpenSky fails or is slow, the last good result for the area (up to 5 min old) is returned.
 
 const ALLOWED_ORIGINS = [
   'https://havardsandvik.github.io',
@@ -17,11 +17,6 @@ const OPENSKY_API = 'https://opensky-network.org/api/states/all';
 const OPENSKY_TOKEN_URL =
   'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
 
-const COMMUNITY = [
-  { name: 'adsb.lol',       url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}` },
-  { name: 'adsb.fi',        url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` },
-  { name: 'airplanes.live', url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}` },
-];
 
 let token = null, tokenExpires = 0;   // cached per Worker isolate
 
@@ -88,7 +83,7 @@ async function openSky(lat, lon, nm, env) {
   const t = await getToken(env);
   const r = await fetch(`${OPENSKY_API}?${q}`, {
     headers: t ? { Authorization: `Bearer ${t}` } : {},
-    signal: AbortSignal.timeout(9000),
+    signal: AbortSignal.timeout(20000),
   });
   if (r.status === 401) token = null;
   if (!r.ok) throw new Error(`${t ? '' : 'anon '}${r.status}`);
@@ -124,35 +119,27 @@ export default {
       return new Response(body, { headers: { 'Content-Type': 'application/json', ...cors(origin) } });
     }
 
-    const errors = [];
-    let result = null;
+    const staleKey = new Request(cacheKey.url + '&stale=1');
+    let result;
     try {
       result = { source: 'opensky', ac: await openSky(Number(la), Number(lo), nmR, env) };
     } catch (e) {
-      errors.push(`opensky ${e.name === 'TimeoutError' ? 'timeout' : e.message}`);
-    }
-    if (!result) {
-      for (const p of COMMUNITY) {
-        try {
-          const r = await fetch(p.url(la, lo, nmR), {
-            headers: { 'User-Agent': 'ferd-relay (personal flight map)' },
-            signal: AbortSignal.timeout(6000),
-          });
-          if (!r.ok) { errors.push(`${p.name} ${r.status}`); continue; }
-          const data = await r.json();
-          result = { source: p.name, ac: data.ac || data.aircraft || [] };
-          break;
-        } catch (e) {
-          errors.push(`${p.name} ${e.name === 'TimeoutError' ? 'timeout' : 'error'}`);
-        }
+      const why = `opensky ${e.name === 'TimeoutError' ? 'timeout' : e.message}`;
+      const old = await cache.match(staleKey);
+      if (old) {
+        const j = await old.json();
+        return json({ ...j, stale: true, detail: [why] }, 200, origin);
       }
+      return json({ error: 'feed failed', detail: [why] }, 502, origin);
     }
-    if (!result) return json({ error: 'all feeds failed', detail: errors }, 502, origin);
 
     const body = JSON.stringify(result);
-    ctx.waitUntil(cache.put(cacheKey, new Response(body, {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=10' },
-    })));
+    ctx.waitUntil(Promise.all([
+      cache.put(cacheKey, new Response(body, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=10' } })),
+      cache.put(staleKey, new Response(body, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })),
+    ]));
     return new Response(body, { headers: { 'Content-Type': 'application/json', ...cors(origin) } });
   },
 };
