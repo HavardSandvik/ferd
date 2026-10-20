@@ -3,12 +3,18 @@
 //
 // GET /near?lat=51.5&lon=-0.12&nm=120
 //
-// Primary source: OpenSky Network. Add your OpenSky API client as Worker secrets
-// (Settings → Variables and Secrets): OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET.
-// Without them it tries OpenSky anonymously, which is heavily rate-limited from Cloudflare.
-// If OpenSky fails or is slow, the last good result for the area (up to 5 min old) is returned.
+// Sources, in order: the community ADS-B feeds (adsb.lol, adsb.fi, airplanes.live), then
+// OpenSky Network (its token endpoint often doesn't answer Cloudflare, so it goes last).
+// OpenSky credentials are Worker secrets: OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET.
+// If every source fails, the last good result for the area (up to 5 min old) is returned.
 
-const VERSION = 3;
+const VERSION = 4;
+
+const COMMUNITY = [
+  { name: 'adsb.lol',       url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}` },
+  { name: 'adsb.fi',        url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` },
+  { name: 'airplanes.live', url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}` },
+];
 
 const ALLOWED_ORIGINS = [
   'https://havardsandvik.github.io',
@@ -85,7 +91,7 @@ async function openSky(lat, lon, nm, env) {
   const t = await getToken(env);
   const r = await fetch(`${OPENSKY_API}?${q}`, {
     headers: t ? { Authorization: `Bearer ${t}` } : {},
-    signal: AbortSignal.timeout(20000),
+    signal: AbortSignal.timeout(5000),
   });
   if (r.status === 401) token = null;
   if (!r.ok) throw new Error(`${t ? '' : 'anon '}${r.status}`);
@@ -122,17 +128,36 @@ export default {
     }
 
     const staleKey = new Request(cacheKey.url + '&stale=1');
-    let result;
-    try {
-      result = { v: VERSION, source: 'opensky', ac: await openSky(Number(la), Number(lo), nmR, env) };
-    } catch (e) {
-      const why = `opensky ${e.name === 'TimeoutError' ? 'timeout' : e.message}`;
+    const errors = [];
+    let result = null;
+    for (const p of COMMUNITY) {
+      try {
+        const r = await fetch(p.url(la, lo, nmR), {
+          headers: { 'User-Agent': 'ferd-relay (personal flight map)' },
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!r.ok) { errors.push(`${p.name} ${r.status}`); continue; }
+        const data = await r.json();
+        result = { v: VERSION, source: p.name, ac: data.ac || data.aircraft || [] };
+        break;
+      } catch (e) {
+        errors.push(`${p.name} ${e.name === 'TimeoutError' ? 'timeout' : 'error'}`);
+      }
+    }
+    if (!result) {
+      try {
+        result = { v: VERSION, source: 'opensky', ac: await openSky(Number(la), Number(lo), nmR, env) };
+      } catch (e) {
+        errors.push(`opensky ${e.name === 'TimeoutError' ? 'timeout' : e.message}`);
+      }
+    }
+    if (!result) {
       const old = await cache.match(staleKey);
       if (old) {
         const j = await old.json();
-        return json({ ...j, stale: true, detail: [why] }, 200, origin);
+        return json({ ...j, stale: true, detail: errors }, 200, origin);
       }
-      return json({ v: VERSION, error: 'feed failed', detail: [why] }, 502, origin);
+      return json({ v: VERSION, error: 'all feeds failed', detail: errors }, 502, origin);
     }
 
     const body = JSON.stringify(result);
