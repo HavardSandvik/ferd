@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ferd</title>
+<meta name="description" content="A clean live flight map.">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1217" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ferd">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%230e1217'/%3E%3Cpath fill='%2367c6d6' transform='translate(3 3) scale(.75)' d='M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: rgba(255,255,255,.92); --ink: #12161c; --muted: #6b7380;
+    --line: rgba(18,22,28,.10); --accent: #0f8fa3;
+    --ground: #9aa1ab; --low: #e0912b; --mid: #0f8fa3; --high: #5b5bd6;
+    --shadow: 0 6px 24px rgba(15,20,30,.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1217; --panel: rgba(22,27,34,.92); --ink: #e8ecf1; --muted: #8b94a1;
+      --line: rgba(232,236,241,.10); --accent: #67c6d6;
+      --ground: #6b7380; --low: #f0a84a; --mid: #67c6d6; --high: #9d9dff;
+      --shadow: 0 6px 24px rgba(0,0,0,.45);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent; }
+  #map { position: fixed; inset: 0; background: var(--bg); }
+
+  .bar { position: fixed; z-index: 1000; left: 12px; right: 12px;
+    top: calc(env(safe-area-inset-top) + 12px);
+    display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px;
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+  .brand { font-weight: 700; letter-spacing: .02em; font-size: 18px; }
+  .bar input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
+    color: var(--ink); font: inherit; padding: 6px 4px; text-transform: uppercase; }
+  .bar input::placeholder { color: var(--muted); text-transform: none; }
+  .status { position: fixed; z-index: 1000; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top) + 70px); font-size: 12px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 10px; white-space: nowrap; box-shadow: var(--shadow); }
+
+  .fab { position: fixed; z-index: 1000; right: 12px; width: 44px; height: 44px;
+    border-radius: 14px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--ink); box-shadow: var(--shadow); display: grid; place-items: center;
+    cursor: pointer; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+  .fab svg { width: 22px; height: 22px; }
+  #locate { bottom: calc(env(safe-area-inset-bottom) + 24px); }
+  body.sheet-open #locate { bottom: calc(env(safe-area-inset-bottom) + 236px); }
+
+  .ac { background: none; border: 0; }
+  .ac .p { width: 26px; height: 26px; transition: transform .6s linear; }
+  .ac svg { width: 100%; height: 100%; display: block;
+    filter: drop-shadow(0 1px 1.5px rgba(0,0,0,.35)); }
+  .p.g svg { fill: var(--ground); } .p.l svg { fill: var(--low); }
+  .p.m svg { fill: var(--mid); }    .p.h svg { fill: var(--high); }
+  .ac.sel .p svg { fill: var(--ink); filter: drop-shadow(0 0 4px var(--accent)); }
+  .me { width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+    border: 3px solid #fff; box-shadow: 0 0 0 6px rgba(15,143,163,.2); }
+
+  .sheet { position: fixed; z-index: 1001; left: 12px; right: 12px;
+    bottom: calc(env(safe-area-inset-bottom) + 12px);
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow);
+    padding: 16px 18px 18px; transform: translateY(0); transition: transform .25s ease, opacity .25s; }
+  .sheet.hidden { transform: translateY(120%); opacity: 0; pointer-events: none; }
+  .sheet-head { display: flex; align-items: baseline; gap: 10px; }
+  .cs { font-size: 24px; font-weight: 700; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 13px; flex: 1; }
+  .close { border: 0; background: transparent; color: var(--muted); font-size: 22px;
+    line-height: 1; cursor: pointer; padding: 0 2px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 10px; margin-top: 14px; }
+  .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+  .btn { flex: 1; text-align: center; text-decoration: none; font: inherit; font-size: 14px;
+    font-weight: 600; padding: 10px; border-radius: 12px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer; }
+  .btn.on { background: var(--accent); color: #fff; border-color: transparent; }
+
+  .leaflet-control-attribution { background: var(--panel) !important; color: var(--muted) !important;
+    font-size: 10px !important; border-radius: 8px 0 0 0; }
+  .leaflet-control-attribution a { color: var(--muted) !important; }
+  @media (min-width: 640px) {
+    .bar { right: auto; width: 380px; }
+    .status { left: 404px; transform: none; top: calc(env(safe-area-inset-top) + 22px); }
+    .sheet { right: auto; width: 380px; }
+    body.sheet-open #locate { bottom: calc(env(safe-area-inset-bottom) + 24px); }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<header class="bar">
+  <div class="brand">ferd</div>
+  <input id="q" type="search" placeholder="Find callsign, e.g. BAW117" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="search">
+</header>
+<div class="status" id="status">Loading…</div>
+
+<button class="fab" id="locate" aria-label="Go to my location">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+</button>
+
+<section class="sheet hidden" id="sheet" aria-live="polite">
+  <div class="sheet-head">
+    <div class="cs" id="s-cs">—</div>
+    <div class="sub" id="s-sub"></div>
+    <button class="close" id="s-close" aria-label="Close">×</button>
+  </div>
+  <div class="grid">
+    <div><div class="k">Altitude</div><div class="v" id="s-alt">—</div></div>
+    <div><div class="k">Speed</div><div class="v" id="s-spd">—</div></div>
+    <div><div class="k">Heading</div><div class="v" id="s-hdg">—</div></div>
+    <div><div class="k">Vertical</div><div class="v" id="s-vr">—</div></div>
+    <div><div class="k">Squawk</div><div class="v" id="s-sq">—</div></div>
+    <div><div class="k">ICAO24</div><div class="v" id="s-id">—</div></div>
+  </div>
+  <div class="actions">
+    <button class="btn" id="s-follow">Follow</button>
+    <a class="btn" id="s-route" target="_blank" rel="noopener">Route ↗</a>
+  </div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(() => {
+  const API = 'https://opensky-network.org/api/states/all';
+  const REFRESH_MS = 30000;   // anonymous tier: 400 credits/day, so keep this gentle
+  const MIN_GAP_MS = 10000;   // never fetch more often than this, even when panning
+  const MAX_AREA = 400;       // sq degrees; above this a call costs 4 credits
+  const PLANE = '<svg viewBox="0 0 24 24"><path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>';
+
+  const $ = id => document.getElementById(id);
+  const store = {
+    get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+  };
+
+  // ---------- map ----------
+  const saved = store.get('ferd:view');
+  const map = L.map('map', { zoomControl: false, worldCopyJump: true })
+    .setView(saved ? [saved.lat, saved.lon] : [51.5, -0.12], saved ? saved.z : 9);
+
+  const darkMq = matchMedia('(prefers-color-scheme: dark)');
+  let tiles;
+  function setTiles() {
+    if (tiles) map.removeLayer(tiles);
+    const style = darkMq.matches ? 'dark_all' : 'light_all';
+    tiles = L.tileLayer(`https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`, {
+      subdomains: 'abcd', maxZoom: 19,
+      attribution: '© OpenStreetMap · © CARTO · Data: OpenSky Network'
+    }).addTo(map);
+  }
+  setTiles();
+  darkMq.addEventListener?.('change', setTiles);
+
+  // ---------- state ----------
+  const planes = new Map();   // icao24 -> { m, d, base }
+  let selected = null, follow = false, lastFetch = 0, pending = null, blockedUntil = 0;
+
+  const setStatus = t => { $('status').textContent = t; };
+
+  function band(d) {
+    if (d.ground) return 'g';
+    const ft = (d.alt || 0) * 3.28084;
+    return ft < 10000 ? 'l' : ft < 30000 ? 'm' : 'h';
+  }
+  function makeIcon(d) {
+    return L.divIcon({
+      className: 'ac' + (d.id === selected ? ' sel' : ''),
+      iconSize: [26, 26], iconAnchor: [13, 13],
+      html: `<div class="p ${band(d)}" style="transform:rotate(${d.trk}deg)">${PLANE}</div>`
+    });
+  }
+
+  // ---------- data ----------
+  async function load() {
+    if (document.hidden) return;
+    const now = Date.now();
+    if (now < blockedUntil) return;
+    const b = map.getBounds();
+    const lamin = Math.max(-90, b.getSouth()), lamax = Math.min(90, b.getNorth());
+    const lomin = Math.max(-180, b.getWest()), lomax = Math.min(180, b.getEast());
+    if ((lamax - lamin) * (lomax - lomin) > MAX_AREA) {
+      setStatus('Zoom in to load flights');
+      return;
+    }
+    lastFetch = now;
+    const url = `${API}?lamin=${lamin.toFixed(3)}&lomin=${lomin.toFixed(3)}&lamax=${lamax.toFixed(3)}&lomax=${lomax.toFixed(3)}`;
+    try {
+      const r = await fetch(url);
+      if (r.status === 429) {
+        blockedUntil = now + 15 * 60 * 1000;
+        setStatus('OpenSky limit reached · retrying in 15 min');
+        return;
+      }
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json();
+      update(j.states || []);
+      const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setStatus(`${planes.size} aircraft · updated ${t}`);
+    } catch (e) {
+      setStatus('Could not reach OpenSky');
+    }
+  }
+
+  function update(states) {
+    const seen = new Set();
+    const t = performance.now();
+    for (const s of states) {
+      const [id, cs, country, , , lon, lat, baro, ground, vel, trk, vr, , geo, sq] = s;
+      if (lat == null || lon == null) continue;
+      seen.add(id);
+      const d = { id, cs: (cs || '').trim(), country, lat, lon, alt: baro ?? geo,
+                  ground, vel: vel || 0, trk: trk || 0, vr, sq };
+      let p = planes.get(id);
+      if (!p) {
+        const m = L.marker([lat, lon], { icon: makeIcon(d), keyboard: false })
+          .on('click', () => select(id)).addTo(map);
+        p = { m };
+        planes.set(id, p);
+      } else {
+        const oldBand = band(p.d);
+        if (oldBand !== band(d)) p.m.setIcon(makeIcon(d));
+        else {
+          const el = p.m.getElement()?.firstChild;
+          if (el) el.style.transform = `rotate(${d.trk}deg)`;
+        }
+        p.m.setLatLng([lat, lon]);
+      }
+      p.d = d;
+      p.base = { lat, lon, t };
+    }
+    for (const [id, p] of planes) {
+      if (!seen.has(id) && id !== selected) { map.removeLayer(p.m); planes.delete(id); }
+    }
+    if (selected) renderSheet();
+  }
+
+  // Dead-reckon between refreshes so aircraft glide rather than jump.
+  function animate() {
+    const now = performance.now();
+    for (const p of planes.values()) {
+      const d = p.d;
+      if (d.ground || !d.vel) continue;
+      const dt = Math.min((now - p.base.t) / 1000, 90);
+      const dist = d.vel * dt, rad = d.trk * Math.PI / 180;
+      const lat = p.base.lat + (dist * Math.cos(rad)) / 111320;
+      const lon = p.base.lon + (dist * Math.sin(rad)) / (111320 * Math.cos(p.base.lat * Math.PI / 180));
+      p.m.setLatLng([lat, lon]);
+      if (follow && d.id === selected) map.panTo([lat, lon], { animate: true, duration: 0.8 });
+    }
+  }
+
+  // ---------- selection / sheet ----------
+  function select(id) {
+    const prev = selected;
+    selected = id;
+    if (prev && planes.has(prev)) planes.get(prev).m.setIcon(makeIcon(planes.get(prev).d));
+    const p = planes.get(id);
+    if (!p) return;
+    p.m.setIcon(makeIcon(p.d));
+    p.m.setZIndexOffset(1000);
+    $('sheet').classList.remove('hidden');
+    document.body.classList.add('sheet-open');
+    renderSheet();
+  }
+  function deselect() {
+    const p = planes.get(selected);
+    selected = null; follow = false;
+    if (p) { p.m.setIcon(makeIcon(p.d)); p.m.setZIndexOffset(0); }
+    $('sheet').classList.add('hidden');
+    document.body.classList.remove('sheet-open');
+    $('s-follow').classList.remove('on');
+  }
+  function renderSheet() {
+    const p = planes.get(selected);
+    if (!p) return;
+    const d = p.d;
+    const ft = d.alt != null ? Math.round(d.alt * 3.28084) : null;
+    $('s-cs').textContent = d.cs || d.id.toUpperCase();
+    $('s-sub').textContent = d.country || '';
+    $('s-alt').textContent = d.ground ? 'Ground' : ft != null ? `${ft.toLocaleString()} ft` : '—';
+    $('s-spd').textContent = d.vel ? `${Math.round(d.vel * 1.94384)} kt` : '—';
+    $('s-hdg').textContent = `${Math.round(d.trk)}°`;
+    $('s-vr').textContent = d.vr != null && !d.ground
+      ? `${d.vr > 0 ? '+' : ''}${Math.round(d.vr * 196.85).toLocaleString()} fpm` : '—';
+    $('s-sq').textContent = d.sq || '—';
+    $('s-id').textContent = d.id.toUpperCase();
+    const route = $('s-route');
+    if (d.cs) { route.href = `https://www.flightaware.com/live/flight/${encodeURIComponent(d.cs)}`; route.style.display = ''; }
+    else route.style.display = 'none';
+  }
+
+  $('s-close').onclick = deselect;
+  $('s-follow').onclick = () => {
+    follow = !follow;
+    $('s-follow').classList.toggle('on', follow);
+    const p = planes.get(selected);
+    if (follow && p) map.panTo(p.m.getLatLng());
+  };
+  map.on('click', deselect);
+  map.on('dragstart', () => { if (follow) { follow = false; $('s-follow').classList.remove('on'); } });
+
+  // ---------- search ----------
+  $('q').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const q = e.target.value.trim().toUpperCase().replace(/\s+/g, '');
+    if (!q) return;
+    let hit = null;
+    for (const p of planes.values()) {
+      if (p.d.cs.toUpperCase() === q) { hit = p; break; }
+      if (!hit && p.d.cs.toUpperCase().startsWith(q)) hit = p;
+    }
+    if (hit) { map.setView(hit.m.getLatLng(), Math.max(map.getZoom(), 9)); select(hit.d.id); e.target.blur(); }
+    else setStatus(`${q} not in view`);
+  });
+
+  // ---------- location ----------
+  let me;
+  $('locate').onclick = () => {
+    if (!navigator.geolocation) return setStatus('Location not available');
+    navigator.geolocation.getCurrentPosition(pos => {
+      const ll = [pos.coords.latitude, pos.coords.longitude];
+      if (me) me.setLatLng(ll);
+      else me = L.marker(ll, { icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [14, 14] }), interactive: false }).addTo(map);
+      map.setView(ll, 9);
+    }, () => setStatus('Location permission denied'), { enableHighAccuracy: false, timeout: 10000 });
+  };
+
+  // ---------- scheduling ----------
+  map.on('moveend', () => {
+    const c = map.getCenter();
+    store.set('ferd:view', { lat: c.lat, lon: c.lng, z: map.getZoom() });
+    clearTimeout(pending);
+    const wait = Math.max(600, lastFetch + MIN_GAP_MS - Date.now());
+    pending = setTimeout(load, wait);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Date.now() - lastFetch > REFRESH_MS) load();
+  });
+  setInterval(() => {
+    animate();
+    if (Date.now() - lastFetch >= REFRESH_MS) load();
+  }, 1000);
+
+  load();
+})();
+</script>
+</body>
+</html>
