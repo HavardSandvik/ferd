@@ -140,7 +140,7 @@
   // the ferd relay (relay/worker.js, a Cloudflare Worker). Set its URL here.
   const RELAY = 'https://ferd-relay.REPLACE-ME.workers.dev';
   const MAX_NM = 250;
-  const REFRESH_MS = 10000;
+  const REFRESH_MS = 15000;   // OpenSky account: 4,000 credits/day
   const MIN_GAP_MS = 4000;    // never fetch more often than this, even when panning
   const PLANE = '<svg viewBox="0 0 24 24"><path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>';
 
