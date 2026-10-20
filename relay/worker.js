@@ -8,6 +8,8 @@
 // Without them it tries OpenSky anonymously, which is heavily rate-limited from Cloudflare.
 // If OpenSky fails or is slow, the last good result for the area (up to 5 min old) is returned.
 
+const VERSION = 3;
+
 const ALLOWED_ORIGINS = [
   'https://havardsandvik.github.io',
   'http://localhost:8000',
@@ -122,7 +124,7 @@ export default {
     const staleKey = new Request(cacheKey.url + '&stale=1');
     let result;
     try {
-      result = { source: 'opensky', ac: await openSky(Number(la), Number(lo), nmR, env) };
+      result = { v: VERSION, source: 'opensky', ac: await openSky(Number(la), Number(lo), nmR, env) };
     } catch (e) {
       const why = `opensky ${e.name === 'TimeoutError' ? 'timeout' : e.message}`;
       const old = await cache.match(staleKey);
@@ -130,7 +132,7 @@ export default {
         const j = await old.json();
         return json({ ...j, stale: true, detail: [why] }, 200, origin);
       }
-      return json({ error: 'feed failed', detail: [why] }, 502, origin);
+      return json({ v: VERSION, error: 'feed failed', detail: [why] }, 502, origin);
     }
 
     const body = JSON.stringify(result);
