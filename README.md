@@ -1,4 +1,4 @@
-# ferd
+# ferð
 
 A clean live flight map. Single-page web app hosted on GitHub Pages.
 
