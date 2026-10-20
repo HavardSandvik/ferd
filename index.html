@@ -105,7 +105,7 @@
 
 <header class="bar">
   <div class="brand">ferð</div>
-  <input id="q" type="search" placeholder="Callsign or registration" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="search">
+  <input id="q" type="search" placeholder="Flight number or callsign" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="search">
 </header>
 <div class="status" id="status">Loading…</div>
 
@@ -143,6 +143,39 @@
   const REFRESH_MS = 15000;   // OpenSky account: 4,000 credits/day
   const MIN_GAP_MS = 4000;    // never fetch more often than this, even when panning
   const PLANE = '<svg viewBox="0 0 24 24"><path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>';
+
+  // ICAO airline code (what ADS-B callsigns use) -> [IATA code, name]
+  const AIRLINES = {
+    NOZ: ['DY', 'Norwegian'], NAX: ['DY', 'Norwegian'], NBT: ['N0', 'Norse Atlantic'],
+    SAS: ['SK', 'SAS'], WIF: ['WF', 'Widerøe'], FIN: ['AY', 'Finnair'], ICE: ['FI', 'Icelandair'],
+    BTI: ['BT', 'airBaltic'], BAW: ['BA', 'British Airways'], SHT: ['BA', 'British Airways'],
+    CFE: ['BA', 'BA CityFlyer'], EFW: ['BA', 'BA Euroflyer'], VIR: ['VS', 'Virgin Atlantic'],
+    EZY: ['U2', 'easyJet'], EJU: ['EC', 'easyJet Europe'], EZS: ['DS', 'easyJet Switzerland'],
+    RYR: ['FR', 'Ryanair'], RUK: ['RK', 'Ryanair UK'], WZZ: ['W6', 'Wizz Air'], WUK: ['W9', 'Wizz Air UK'],
+    EXS: ['LS', 'Jet2'], TOM: ['BY', 'TUI'], LOG: ['LM', 'Loganair'], EIN: ['EI', 'Aer Lingus'],
+    KLM: ['KL', 'KLM'], AFR: ['AF', 'Air France'], TRA: ['HV', 'Transavia'], TVF: ['TO', 'Transavia France'],
+    DLH: ['LH', 'Lufthansa'], CLH: ['LH', 'Lufthansa CityLine'], EWG: ['EW', 'Eurowings'],
+    SWR: ['LX', 'Swiss'], AUA: ['OS', 'Austrian'], BEL: ['SN', 'Brussels Airlines'],
+    IBE: ['IB', 'Iberia'], VLG: ['VY', 'Vueling'], TAP: ['TP', 'TAP Air Portugal'], ITY: ['AZ', 'ITA Airways'],
+    AEE: ['A3', 'Aegean'], LOT: ['LO', 'LOT'], CSA: ['OK', 'Czech Airlines'], THY: ['TK', 'Turkish Airlines'],
+    PGT: ['PC', 'Pegasus'], ELY: ['LY', 'El Al'], UAE: ['EK', 'Emirates'], QTR: ['QR', 'Qatar Airways'],
+    ETD: ['EY', 'Etihad'], GFA: ['GF', 'Gulf Air'], OMA: ['WY', 'Oman Air'], SVA: ['SV', 'Saudia'],
+    AIC: ['AI', 'Air India'], IGO: ['6E', 'IndiGo'], SIA: ['SQ', 'Singapore Airlines'], CPA: ['CX', 'Cathay Pacific'],
+    ANA: ['NH', 'ANA'], JAL: ['JL', 'Japan Airlines'], KAL: ['KE', 'Korean Air'], QFA: ['QF', 'Qantas'],
+    ANZ: ['NZ', 'Air New Zealand'], ETH: ['ET', 'Ethiopian'], MSR: ['MS', 'EgyptAir'], RAM: ['AT', 'Royal Air Maroc'],
+    SAA: ['SA', 'South African'], AAL: ['AA', 'American'], DAL: ['DL', 'Delta'], UAL: ['UA', 'United'],
+    ACA: ['AC', 'Air Canada'], JBU: ['B6', 'JetBlue'], SWA: ['WN', 'Southwest'], ASA: ['AS', 'Alaska']
+  };
+  // Flight number from a callsign, only when the suffix is purely numeric
+  // (many airlines, e.g. BA and easyJet, often use alphanumeric callsigns that don't map).
+  function flightInfo(cs) {
+    const m = /^([A-Z]{3})(\d{1,4})$/.exec(cs || '');
+    const al = AIRLINES[(cs || '').slice(0, 3)];
+    return {
+      airline: al ? al[1] : '',
+      flightNo: m && al ? al[0] + String(Number(m[2])) : ''
+    };
+  }
 
   const $ = id => document.getElementById(id);
   const store = {
@@ -223,6 +256,7 @@
       const d = { id, cs: (a.flight || '').trim(), reg: a.r || '', type: a.t || '',
                   lat, lon, alt, ground, vel: a.gs || 0, trk: a.track ?? a.true_heading ?? 0,
                   vr: a.baro_rate ?? a.geom_rate, sq: a.squawk };
+      Object.assign(d, flightInfo(d.cs.toUpperCase()));
       let p = planes.get(id);
       if (!p) {
         const m = L.marker([lat, lon], { icon: makeIcon(d), keyboard: false })
@@ -288,8 +322,8 @@
     if (!p) return;
     const d = p.d;
     const ft = d.alt != null ? Math.round(d.alt) : null;
-    $('s-cs').textContent = d.cs || d.reg || d.id.toUpperCase();
-    $('s-sub').textContent = [d.type, d.reg].filter(Boolean).join(' · ');
+    $('s-cs').textContent = d.flightNo || d.cs || d.reg || d.id.toUpperCase();
+    $('s-sub').textContent = [d.airline, d.flightNo ? d.cs : '', d.type, d.reg].filter(Boolean).join(' · ');
     $('s-alt').textContent = d.ground ? 'Ground' : ft != null ? `${ft.toLocaleString()} ft` : '—';
     $('s-spd').textContent = d.vel ? `${Math.round(d.vel)} kt` : '—';
     $('s-hdg').textContent = `${Math.round(d.trk)}°`;
@@ -317,11 +351,13 @@
     if (e.key !== 'Enter') return;
     const q = e.target.value.trim().toUpperCase().replace(/\s+/g, '');
     if (!q) return;
+    const qn = q.replace(/^([A-Z0-9]{2})0+(?=\d)/, '$1');   // DY0123 -> DY123
     let hit = null;
     for (const p of planes.values()) {
       const cs = p.d.cs.toUpperCase(), reg = p.d.reg.toUpperCase().replace(/-/g, '');
-      if (cs === q || reg === q.replace(/-/g, '')) { hit = p; break; }
-      if (!hit && cs.startsWith(q)) hit = p;
+      const fn = p.d.flightNo;
+      if (cs === q || fn === qn || reg === q.replace(/-/g, '')) { hit = p; break; }
+      if (!hit && (cs.startsWith(q) || (fn && fn.startsWith(qn)))) hit = p;
     }
     if (hit) { map.setView(hit.m.getLatLng(), Math.max(map.getZoom(), 9)); select(hit.d.id); e.target.blur(); }
     else setStatus(`${q} not in view`);
