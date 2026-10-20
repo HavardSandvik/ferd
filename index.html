@@ -199,13 +199,13 @@
         setStatus('OpenSky limit reached · retrying in 15 min');
         return;
       }
-      if (!r.ok) throw new Error(r.status);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json();
       update(j.states || []);
       const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setStatus(`${planes.size} aircraft · updated ${t}`);
     } catch (e) {
-      setStatus('Could not reach OpenSky');
+      setStatus(`Could not reach OpenSky (${e.message || e.name})`);
     }
   }
 
