@@ -58,7 +58,41 @@
     cursor: pointer; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
   .fab svg { width: 22px; height: 22px; }
   #locate { bottom: calc(env(safe-area-inset-bottom) + 24px); }
-  body.sheet-open #locate { bottom: calc(env(safe-area-inset-bottom) + 236px); }
+  body.sheet-open #locate { bottom: calc(env(safe-area-inset-bottom) + 268px); }
+
+  .suggest { position: fixed; z-index: 1002; left: 12px; right: 12px;
+    top: calc(env(safe-area-inset-top) + 70px); max-height: min(60vh, 440px); overflow-y: auto;
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow);
+    padding: 6px; display: none; }
+  .suggest.open { display: block; }
+  .sg-h { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+    padding: 8px 10px 4px; }
+  .sg { display: flex; align-items: baseline; gap: 10px; padding: 9px 10px; border-radius: 10px; cursor: pointer; }
+  .sg.act { background: var(--line); }
+  .sg b { min-width: 44px; font-weight: 700; letter-spacing: .02em; }
+  .sg .n { flex: 1; min-width: 0; color: var(--muted); font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sg .c { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .sg-empty { padding: 10px; color: var(--muted); font-size: 13px; }
+
+  .filter { position: fixed; z-index: 1000; left: 12px; top: calc(env(safe-area-inset-top) + 70px);
+    display: none; align-items: center; gap: 4px; padding: 4px 4px 4px 12px;
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); font-size: 13px; }
+  body.filtering .filter { display: flex; }
+  body.filtering .status { top: calc(env(safe-area-inset-top) + 116px); }
+  .filter b { margin-right: 4px; letter-spacing: .02em; }
+  .seg button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px;
+    padding: 5px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .filter .close { font-size: 18px; padding: 0 8px; }
+  .ac.dim .p { opacity: .16; }
+
+  .path { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; margin-top: 6px; font-size: 14px; color: var(--muted); }
+  .path .ap { border: 0; background: transparent; padding: 0; font: inherit; font-weight: 700;
+    color: var(--accent); cursor: pointer; }
+  .path .arrow { margin: 0 2px; }
 
   .ac { background: none; border: 0; }
   .ac .p { width: 26px; height: 26px; transition: transform .6s linear; }
@@ -98,6 +132,8 @@
     .status { left: 404px; transform: none; top: calc(env(safe-area-inset-top) + 22px); }
     .sheet { right: auto; width: 380px; }
     body.sheet-open #locate { bottom: calc(env(safe-area-inset-bottom) + 24px); }
+    .suggest { right: auto; width: 380px; }
+    body.filtering .status { top: calc(env(safe-area-inset-top) + 22px); }
   }
 </style>
 </head>
@@ -106,8 +142,16 @@
 
 <header class="bar">
   <div class="brand">ferð</div>
-  <input id="q" type="search" placeholder="Flight number or callsign" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="search">
+  <input id="q" type="search" placeholder="Flight, airport or city" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="search">
 </header>
+<div class="suggest" id="suggest" role="listbox"></div>
+<div class="filter" id="filter">
+  <b id="f-code"></b>
+  <div class="seg" id="f-seg">
+    <button data-dir="all">All</button><button data-dir="dep">Departing</button><button data-dir="arr">Arriving</button>
+  </div>
+  <button class="close" id="f-x" aria-label="Clear airport filter">×</button>
+</div>
 <div class="status" id="status">Loading…</div>
 
 <button class="fab" id="locate" aria-label="Go to my location">
@@ -120,6 +164,7 @@
     <div class="sub" id="s-sub"></div>
     <button class="close" id="s-close" aria-label="Close">×</button>
   </div>
+  <div class="path" id="s-path"></div>
   <div class="grid">
     <div><div class="k">Altitude</div><div class="v" id="s-alt">—</div></div>
     <div><div class="k">Speed</div><div class="v" id="s-spd">—</div></div>
@@ -179,6 +224,83 @@
   }
 
   const $ = id => document.getElementById(id);
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // Upper-case and strip accents so "tromso" finds Tromsø
+  const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase()
+    .replace(/Ø/g, 'O').replace(/Æ/g, 'AE');
+
+  // ---------- routes ----------
+  // ADS-B doesn't carry origin/destination, so routes come from the adsb.lol copy of the
+  // Virtual Radar Server standing data: one static JSON file per callsign, CORS-enabled.
+  // These are scheduled routes, so occasionally wrong for a given day.
+  const ROUTES = 'https://vrs-standing-data.adsb.lol/routes';
+  const routes = new Map();        // callsign -> [airport key, ...] or null (unknown)
+  const airportInfo = new Map();   // airport key (IATA, else ICAO) -> { key, iata, icao, name, city }
+  const routeQueue = [], routeWanted = new Set();
+  let routeActive = 0, routesTimer = null;
+  const isAirlineCs = cs => /^[A-Z]{3}\d[A-Z0-9]{0,3}$/.test(cs);
+
+  function parseRoute(j) {
+    const stops = (j._airports || []).map(a => {
+      const key = a.iata || a.icao;
+      if (key && !airportInfo.has(key)) {
+        airportInfo.set(key, { key, iata: a.iata || '', icao: a.icao || '', name: a.name || '', city: a.location || '' });
+      }
+      return key;
+    }).filter(Boolean);
+    return stops.length >= 2 ? stops : null;
+  }
+  async function fetchRoute(cs) {
+    let route = null;
+    try {
+      const r = await fetch(`${ROUTES}/${cs.slice(0, 2)}/${cs}.json`, { signal: AbortSignal.timeout(10000) });
+      if (r.ok) route = parseRoute(await r.json());
+      else if (r.status !== 404) return;   // transient: try again on a later refresh
+    } catch { return; }
+    routes.set(cs, route);
+    clearTimeout(routesTimer);
+    routesTimer = setTimeout(routesChanged, 250);
+  }
+  function pumpRoutes() {
+    while (routeActive < 8 && routeQueue.length) {
+      const cs = routeQueue.shift();
+      routeActive++;
+      fetchRoute(cs).finally(() => { routeActive--; routeWanted.delete(cs); pumpRoutes(); });
+    }
+  }
+  function wantRoute(cs, urgent = false) {
+    if (!isAirlineCs(cs) || routes.has(cs)) return;
+    const i = routeQueue.indexOf(cs);
+    if (urgent && i > 0) { routeQueue.splice(i, 1); routeQueue.unshift(cs); }
+    else if (!routeWanted.has(cs)) { routeWanted.add(cs); urgent ? routeQueue.unshift(cs) : routeQueue.push(cs); }
+    pumpRoutes();
+  }
+  const routeOf = d => routes.get(d.cs.toUpperCase()) || null;
+  const apCode = k => { const a = airportInfo.get(k); return a ? (a.iata || a.icao) : k; };
+
+  // ---------- airport filter ----------
+  let filter = null;   // { key, dir: 'all' | 'dep' | 'arr' }
+  function matchesAirport(d, key, dir) {
+    const st = routeOf(d);
+    const i = st ? st.indexOf(key) : -1;
+    if (i < 0) return false;
+    return dir === 'all' || (dir === 'dep' ? i < st.length - 1 : i > 0);
+  }
+  // Departures/arrivals per airport among the aircraft currently loaded
+  function airportCounts() {
+    const m = new Map();
+    for (const p of planes.values()) {
+      const st = routeOf(p.d);
+      if (!st) continue;
+      st.forEach((k, i) => {
+        let c = m.get(k);
+        if (!c) { c = { dep: 0, arr: 0 }; m.set(k, c); }
+        if (i < st.length - 1) c.dep++;
+        if (i > 0) c.arr++;
+      });
+    }
+    return m;
+  }
   const store = {
     get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
@@ -193,7 +315,7 @@
   // OpenStreetMap tiles (no key). Light/dark styling is done with a CSS filter on the tile pane.
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ADS-B: adsb.lol / adsb.fi / airplanes.live'
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ADS-B: adsb.lol / adsb.fi / airplanes.live · Routes: adsb.lol'
   }).addTo(map);
 
   // ---------- state ----------
@@ -207,9 +329,13 @@
     const ft = d.alt || 0;
     return ft < 10000 ? 'l' : ft < 30000 ? 'm' : 'h';
   }
+  const isDim = d => !!filter && d.id !== selected && !matchesAirport(d, filter.key, filter.dir);
+  const iconKey = d => band(d) + (isDim(d) ? 'd' : '') + (d.id === selected ? 's' : '');
+  function setIconFor(p) { p.m.setIcon(makeIcon(p.d)); p.key = iconKey(p.d); }
+  function refreshIcons() { for (const p of planes.values()) if (iconKey(p.d) !== p.key) setIconFor(p); }
   function makeIcon(d) {
     return L.divIcon({
-      className: 'ac' + (d.id === selected ? ' sel' : ''),
+      className: 'ac' + (d.id === selected ? ' sel' : '') + (isDim(d) ? ' dim' : ''),
       iconSize: [26, 26], iconAnchor: [13, 13],
       html: `<div class="p ${band(d)}" style="transform:rotate(${d.trk}deg)">${PLANE}</div>`
     });
@@ -258,28 +384,37 @@
                   lat, lon, alt, ground, vel: a.gs || 0, trk: a.track ?? a.true_heading ?? 0,
                   vr: a.baro_rate ?? a.geom_rate, sq: a.squawk };
       Object.assign(d, flightInfo(d.cs.toUpperCase()));
+      wantRoute(d.cs.toUpperCase());
       let p = planes.get(id);
       if (!p) {
         const m = L.marker([lat, lon], { icon: makeIcon(d), keyboard: false })
           .on('click', () => select(id)).addTo(map);
-        p = { m };
+        p = { m, key: iconKey(d) };
         planes.set(id, p);
       } else {
-        const oldBand = band(p.d);
-        if (oldBand !== band(d)) p.m.setIcon(makeIcon(d));
-        else {
-          const el = p.m.getElement()?.firstChild;
-          if (el) el.style.transform = `rotate(${d.trk}deg)`;
-        }
         p.m.setLatLng([lat, lon]);
       }
       p.d = d;
       p.base = { lat, lon, t };
+      if (iconKey(d) !== p.key) setIconFor(p);
+      else {
+        const el = p.m.getElement()?.firstChild;
+        if (el) el.style.transform = `rotate(${d.trk}deg)`;
+      }
     }
     for (const [id, p] of planes) {
       if (!seen.has(id) && id !== selected) { map.removeLayer(p.m); planes.delete(id); }
     }
     if (selected) renderSheet();
+    if (filter) renderFilter();
+    if ($('suggest').classList.contains('open')) renderSuggest();
+  }
+
+  function routesChanged() {
+    refreshIcons();
+    if (selected) renderSheet();
+    if (filter) renderFilter();
+    if ($('suggest').classList.contains('open')) renderSuggest();
   }
 
   // Dead-reckon between refreshes so aircraft glide rather than jump.
@@ -301,11 +436,12 @@
   function select(id) {
     const prev = selected;
     selected = id;
-    if (prev && planes.has(prev)) planes.get(prev).m.setIcon(makeIcon(planes.get(prev).d));
+    if (prev && planes.has(prev)) { const q = planes.get(prev); setIconFor(q); q.m.setZIndexOffset(0); }
     const p = planes.get(id);
     if (!p) return;
-    p.m.setIcon(makeIcon(p.d));
+    setIconFor(p);
     p.m.setZIndexOffset(1000);
+    wantRoute(p.d.cs.toUpperCase(), true);
     $('sheet').classList.remove('hidden');
     document.body.classList.add('sheet-open');
     renderSheet();
@@ -313,7 +449,7 @@
   function deselect() {
     const p = planes.get(selected);
     selected = null; follow = false;
-    if (p) { p.m.setIcon(makeIcon(p.d)); p.m.setZIndexOffset(0); }
+    if (p) { setIconFor(p); p.m.setZIndexOffset(0); }
     $('sheet').classList.add('hidden');
     document.body.classList.remove('sheet-open');
     $('s-follow').classList.remove('on');
@@ -325,6 +461,17 @@
     const ft = d.alt != null ? Math.round(d.alt) : null;
     $('s-cs').textContent = d.flightNo || d.cs || d.reg || d.id.toUpperCase();
     $('s-sub').textContent = [d.airline, d.flightNo ? d.cs : '', d.type, d.reg].filter(Boolean).join(' · ');
+    const cs = d.cs.toUpperCase(), st = routeOf(d), path = $('s-path');
+    if (st) {
+      path.innerHTML = st.map(k => {
+        const a = airportInfo.get(k);
+        return `<button class="ap" data-ap="${esc(k)}" title="${esc(a?.name)}">${esc(apCode(k))}</button>`
+          + (a?.city ? `<span>${esc(a.city)}</span>` : '');
+      }).join('<span class="arrow">→</span>');
+    } else {
+      path.textContent = !isAirlineCs(cs) ? '' : routes.has(cs) ? 'Route not known' : 'Looking up route…';
+    }
+    path.style.display = path.textContent ? '' : 'none';
     $('s-alt').textContent = d.ground ? 'Ground' : ft != null ? `${ft.toLocaleString()} ft` : '—';
     $('s-spd').textContent = d.vel ? `${Math.round(d.vel)} kt` : '—';
     $('s-hdg').textContent = `${Math.round(d.trk)}°`;
@@ -347,21 +494,156 @@
   map.on('click', deselect);
   map.on('dragstart', () => { if (follow) { follow = false; $('s-follow').classList.remove('on'); } });
 
-  // ---------- search ----------
-  $('q').addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
-    const q = e.target.value.trim().toUpperCase().replace(/\s+/g, '');
-    if (!q) return;
-    const qn = q.replace(/^([A-Z0-9]{2})0+(?=\d)/, '$1');   // DY0123 -> DY123
-    let hit = null;
-    for (const p of planes.values()) {
-      const cs = p.d.cs.toUpperCase(), reg = p.d.reg.toUpperCase().replace(/-/g, '');
-      const fn = p.d.flightNo;
-      if (cs === q || fn === qn || reg === q.replace(/-/g, '')) { hit = p; break; }
-      if (!hit && (cs.startsWith(q) || (fn && fn.startsWith(qn)))) hit = p;
+  $('s-path').addEventListener('click', e => {
+    const b = e.target.closest('[data-ap]');
+    if (b) setFilter(b.dataset.ap, 'all');
+  });
+
+  // ---------- airport filter UI ----------
+  function setFilter(key, dir = 'all') {
+    filter = key ? { key, dir } : null;
+    document.body.classList.toggle('filtering', !!filter);
+    renderFilter();
+    refreshIcons();
+  }
+  function renderFilter() {
+    if (!filter) return;
+    const a = airportInfo.get(filter.key);
+    $('f-code').textContent = apCode(filter.key);
+    $('f-code').title = a ? a.name : '';
+    for (const b of $('f-seg').children) {
+      const dir = b.dataset.dir;
+      let n = 0;
+      for (const p of planes.values()) if (matchesAirport(p.d, filter.key, dir)) n++;
+      b.textContent = `${{ all: 'All', dep: 'Departing', arr: 'Arriving' }[dir]} ${n}`;
+      b.classList.toggle('on', dir === filter.dir);
     }
-    if (hit) { map.setView(hit.m.getLatLng(), Math.max(map.getZoom(), 9)); select(hit.d.id); e.target.blur(); }
-    else setStatus(`${q} not in view`);
+  }
+  $('f-seg').addEventListener('click', e => {
+    const dir = e.target.dataset?.dir;
+    if (dir && filter) { filter.dir = dir; renderFilter(); refreshIcons(); }
+  });
+  $('f-x').onclick = () => setFilter(null);
+
+  // ---------- search + suggestions ----------
+  let sgItems = [], sgIdx = 0;
+
+  function scoreAirport(a, q) {
+    if (!q) return 9;
+    const iata = norm(a.iata), icao = norm(a.icao), city = norm(a.city), name = norm(a.name);
+    if (iata === q || icao === q) return 0;
+    if (iata.startsWith(q)) return 1;
+    if (icao.startsWith(q)) return 2;
+    if (city.startsWith(q)) return 3;
+    if (name.split(/[\s,\-\/()]+/).some(w => w.startsWith(q))) return 4;
+    if (city.includes(q) || name.includes(q)) return 5;
+    return -1;
+  }
+  function scoreFlight(d, q, qn) {
+    const cs = d.cs.toUpperCase(), reg = d.reg.toUpperCase().replace(/-/g, ''), fn = d.flightNo;
+    if (cs === q || fn === qn || (reg && reg === q.replace(/-/g, ''))) return 0;
+    if (cs.startsWith(q) || (fn && fn.startsWith(qn)) || (reg && reg.startsWith(q.replace(/-/g, '')))) return 1;
+    return -1;
+  }
+  const routeText = d => { const st = routeOf(d); return st ? st.map(apCode).join(' → ') : ''; };
+
+  function renderSuggest() {
+    const box = $('suggest');
+    const raw = $('q').value.trim();
+    const q = norm(raw).replace(/\s+/g, ' ');
+    const qn = q.replace(/\s+/g, '').replace(/^([A-Z0-9]{2})0+(?=\d)/, '$1');   // DY0123 -> DY123
+    const counts = airportCounts();
+
+    const aps = [];
+    for (const [k, c] of counts) {
+      const a = airportInfo.get(k);
+      if (!a) continue;
+      const s = scoreAirport(a, q);
+      if (s >= 0) aps.push({ a, c, s, total: c.dep + c.arr });
+    }
+    aps.sort((x, y) => x.s - y.s || y.total - x.total || x.a.key.localeCompare(y.a.key));
+
+    const fls = [];
+    if (q) {
+      for (const p of planes.values()) {
+        const s = scoreFlight(p.d, q.replace(/\s+/g, ''), qn);
+        if (s >= 0) fls.push({ d: p.d, s });
+      }
+      fls.sort((x, y) => x.s - y.s || (x.d.flightNo || x.d.cs).localeCompare(y.d.flightNo || y.d.cs));
+    }
+
+    const apRows = aps.slice(0, q ? 8 : 60).map(({ a, c }) => {
+      const name = a.city && !norm(a.name).includes(norm(a.city)) ? `${a.city} · ${a.name}` : (a.name || a.city);
+      return { item: { ap: a.key }, html: `<b>${esc(a.iata || a.icao)}</b><span class="n">${esc(name)}</span>`
+        + `<span class="c">${c.dep} dep · ${c.arr} arr</span>` };
+    });
+    const flRows = fls.slice(0, 6).map(({ d }) => ({
+      item: { id: d.id },
+      html: `<b>${esc(d.flightNo || d.cs || d.reg)}</b><span class="n">${esc([routeText(d), d.airline].filter(Boolean).join(' · '))}</span>`
+        + `<span class="c">${esc(d.type)}</span>`
+    }));
+
+    const sections = [['Airports in view', apRows], ['Flights', flRows]];
+    if (fls.length && fls[0].s === 0) sections.reverse();   // an exact flight match goes first
+
+    sgItems = [];
+    let html = '';
+    for (const [title, rows] of sections) {
+      if (!rows.length) continue;
+      html += `<div class="sg-h">${title}</div>`;
+      for (const r of rows) html += `<div class="sg" role="option" data-i="${sgItems.push(r.item) - 1}">${r.html}</div>`;
+    }
+    if (!sgItems.length) {
+      const pending = routeQueue.length + routeActive;
+      html = `<div class="sg-empty">${!q && pending ? 'Looking up routes…'
+        : q ? `Nothing matching “${esc(raw)}” in view${pending ? ' yet' : ''}` : 'No routes known for aircraft in view'}</div>`;
+    }
+    sgIdx = Math.min(sgIdx, Math.max(0, sgItems.length - 1));
+    box.innerHTML = html;
+    markActive();
+  }
+  function markActive() {
+    for (const el of $('suggest').querySelectorAll('.sg')) {
+      const on = Number(el.dataset.i) === sgIdx;
+      el.classList.toggle('act', on);
+      if (on) el.scrollIntoView({ block: 'nearest' });
+    }
+  }
+  function openSuggest() { $('suggest').classList.add('open'); renderSuggest(); }
+  function closeSuggest() { $('suggest').classList.remove('open'); }
+  function pick(item) {
+    if (!item) return;
+    $('q').value = '';
+    closeSuggest();
+    $('q').blur();
+    if (item.ap) setFilter(item.ap, 'all');
+    else {
+      const p = planes.get(item.id);
+      if (p) { map.setView(p.m.getLatLng(), Math.max(map.getZoom(), 9)); select(item.id); }
+    }
+  }
+
+  $('q').addEventListener('focus', openSuggest);
+  $('q').addEventListener('input', () => { sgIdx = 0; openSuggest(); });
+  $('q').addEventListener('blur', () => setTimeout(closeSuggest, 150));
+  $('q').addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!sgItems.length) return;
+      sgIdx = (sgIdx + (e.key === 'ArrowDown' ? 1 : -1) + sgItems.length) % sgItems.length;
+      markActive();
+    } else if (e.key === 'Enter') {
+      if (sgItems.length) pick(sgItems[sgIdx]);
+      else if (e.target.value.trim()) setStatus(`${e.target.value.trim().toUpperCase()} not in view`);
+    } else if (e.key === 'Escape') {
+      closeSuggest(); e.target.blur();
+    }
+  });
+  // Keep the input focused while tapping a suggestion, then pick it.
+  $('suggest').addEventListener('mousedown', e => e.preventDefault());
+  $('suggest').addEventListener('click', e => {
+    const el = e.target.closest('.sg');
+    if (el) pick(sgItems[Number(el.dataset.i)]);
   });
 
   // ---------- location ----------
