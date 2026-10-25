@@ -79,9 +79,14 @@
   .filter { position: fixed; z-index: 1000; left: 12px; top: calc(env(safe-area-inset-top) + 70px);
     display: none; align-items: center; gap: 4px; padding: 4px 4px 4px 12px;
     background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); font-size: 13px; }
+    border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); font-size: 13px;
+    flex-wrap: wrap; max-width: calc(100vw - 24px); }
   body.filtering .filter { display: flex; }
-  body.filtering .status { top: calc(env(safe-area-inset-top) + 116px); }
+  body.filtering .status { top: calc(env(safe-area-inset-top) + 78px + var(--fh, 38px)); }
+  .filter.pair { border-radius: 16px; padding: 6px 4px 4px 12px; row-gap: 4px; }
+  .filter.pair b { flex: 1; }
+  .filter.pair .close { order: 1; }
+  .filter.pair .seg { order: 2; flex-basis: 100%; margin-left: -8px; }
   .filter b { margin-right: 4px; letter-spacing: .02em; }
   .seg button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px;
     padding: 5px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap; }
@@ -279,12 +284,28 @@
   const apCode = k => { const a = airportInfo.get(k); return a ? (a.iata || a.icao) : k; };
 
   // ---------- airport filter ----------
-  let filter = null;   // { key, dir: 'all' | 'dep' | 'arr' }
-  function matchesAirport(d, key, dir) {
+  // filter = { a: side, b: side | null, dir }
+  //   one airport:  dir 'all' | 'dep' | 'arr'
+  //   two airports: dir 'both' | 'ab' (a -> b) | 'ba' (b -> a)
+  // side = { label, code: true, q: 'LHR' }        an airport code
+  //      | { label, code: false, q: 'LONDON' }    a city/name, matching every airport it fits
+  let filter = null;
+  const codeSide = key => ({ label: apCode(key), code: true, q: norm(apCode(key)) });
+  function sideHas(side, key) {
+    const a = airportInfo.get(key);
+    if (side.code) return norm(key) === side.q || (!!a && (norm(a.iata) === side.q || norm(a.icao) === side.q));
+    const s = a ? scoreAirport(a, side.q) : -1;
+    return s >= 0 && s <= 4;
+  }
+  function matchFilter(d, f, dir) {
     const st = routeOf(d);
-    const i = st ? st.indexOf(key) : -1;
-    if (i < 0) return false;
-    return dir === 'all' || (dir === 'dep' ? i < st.length - 1 : i > 0);
+    if (!st) return false;
+    const idx = side => st.map((k, i) => (sideHas(side, k) ? i : -1)).filter(i => i >= 0);
+    const ia = idx(f.a);
+    if (!ia.length) return false;
+    if (!f.b) return dir === 'all' || ia.some(i => (dir === 'dep' ? i < st.length - 1 : i > 0));
+    const ib = idx(f.b);
+    return ia.some(i => ib.some(j => i !== j && (dir === 'both' || (dir === 'ab' ? i < j : j < i))));
   }
   // Departures/arrivals per airport among the aircraft currently loaded
   function airportCounts() {
@@ -329,7 +350,7 @@
     const ft = d.alt || 0;
     return ft < 10000 ? 'l' : ft < 30000 ? 'm' : 'h';
   }
-  const isDim = d => !!filter && d.id !== selected && !matchesAirport(d, filter.key, filter.dir);
+  const isDim = d => !!filter && d.id !== selected && !matchFilter(d, filter, filter.dir);
   const iconKey = d => band(d) + (isDim(d) ? 'd' : '') + (d.id === selected ? 's' : '');
   function setIconFor(p) { p.m.setIcon(makeIcon(p.d)); p.key = iconKey(p.d); }
   function refreshIcons() { for (const p of planes.values()) if (iconKey(p.d) !== p.key) setIconFor(p); }
@@ -496,28 +517,36 @@
 
   $('s-path').addEventListener('click', e => {
     const b = e.target.closest('[data-ap]');
-    if (b) setFilter(b.dataset.ap, 'all');
+    if (b) setFilter({ a: codeSide(b.dataset.ap), b: null, dir: 'all' });
   });
 
   // ---------- airport filter UI ----------
-  function setFilter(key, dir = 'all') {
-    filter = key ? { key, dir } : null;
+  function setFilter(f) {
+    filter = f || null;
     document.body.classList.toggle('filtering', !!filter);
     renderFilter();
     refreshIcons();
   }
+  const sideTitle = side => {
+    if (!side.code) return '';
+    const a = [...airportInfo.values()].find(x => norm(x.iata) === side.q || norm(x.icao) === side.q);
+    return a ? a.name : '';
+  };
   function renderFilter() {
     if (!filter) return;
-    const a = airportInfo.get(filter.key);
-    $('f-code').textContent = apCode(filter.key);
-    $('f-code').title = a ? a.name : '';
-    for (const b of $('f-seg').children) {
-      const dir = b.dataset.dir;
+    const { a, b } = filter;
+    $('f-code').textContent = b ? `${a.label} ⇄ ${b.label}` : a.label;
+    $('f-code').title = [sideTitle(a), b && sideTitle(b)].filter(Boolean).join(' ⇄ ');
+    const dirs = b
+      ? [['both', 'Both ways'], ['ab', `To ${b.label}`], ['ba', `To ${a.label}`]]
+      : [['all', 'All'], ['dep', 'Departing'], ['arr', 'Arriving']];
+    $('f-seg').innerHTML = dirs.map(([dir, label]) => {
       let n = 0;
-      for (const p of planes.values()) if (matchesAirport(p.d, filter.key, dir)) n++;
-      b.textContent = `${{ all: 'All', dep: 'Departing', arr: 'Arriving' }[dir]} ${n}`;
-      b.classList.toggle('on', dir === filter.dir);
-    }
+      for (const p of planes.values()) if (matchFilter(p.d, filter, dir)) n++;
+      return `<button data-dir="${dir}" class="${dir === filter.dir ? 'on' : ''}">${esc(label)} ${n}</button>`;
+    }).join('');
+    $('filter').classList.toggle('pair', !!b);
+    document.body.style.setProperty('--fh', `${$('filter').offsetHeight}px`);
   }
   $('f-seg').addEventListener('click', e => {
     const dir = e.target.dataset?.dir;
@@ -547,6 +576,42 @@
   }
   const routeText = d => { const st = routeOf(d); return st ? st.map(apCode).join(' → ') : ''; };
 
+  // "LHR BGO", "LHR-BGO", "LHR to BGO", "London > Bergen" -> { a, b } or null
+  function makeSide(t, explicit) {
+    if (!t) return null;
+    const known = [...airportInfo.values()];
+    if (known.some(a => norm(a.iata) === t || norm(a.icao) === t)) return { label: t, code: true, q: t };
+    const hits = known.filter(a => { const s = scoreAirport(a, t); return s >= 0 && s <= 4; });
+    if (hits.length) {
+      const cities = new Set(hits.map(a => a.city).filter(Boolean));
+      const label = cities.size === 1 ? [...cities][0]
+        : t.toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase());
+      return { label, code: false, q: t };
+    }
+    // A code for an airport with no flights in view yet still works as a filter
+    if (/^[A-Z]{3}$/.test(t) || (explicit && /^[A-Z]{4}$/.test(t))) return { label: t, code: true, q: t };
+    return null;
+  }
+  function parsePair(q) {
+    const tryPair = (l, r, explicit) => {
+      const a = makeSide(l.trim(), explicit), b = makeSide(r.trim(), explicit);
+      return a && b && !(a.code && b.code && a.q === b.q) ? { a, b } : null;
+    };
+    const parts = q.split(/\s*(?:→|->|<->|⇄|>|–|—|,)\s*|\s+-\s+|\s+TO\s+/).filter(Boolean);
+    if (parts.length === 2) return tryPair(parts[0], parts[1], true);
+    const m = /^([A-Z]{3,4})-([A-Z]{3,4})$/.exec(q);
+    if (m) return tryPair(m[1], m[2], true);
+    // Plain spaces: only when the whole text isn't itself an airport ("New York")
+    const words = q.split(' ');
+    if (words.length < 2) return null;
+    if ([...airportInfo.values()].some(a => { const s = scoreAirport(a, q); return s >= 0 && s <= 4; })) return null;
+    for (let k = 1; k < words.length; k++) {
+      const p = tryPair(words.slice(0, k).join(' '), words.slice(k).join(' '), false);
+      if (p) return p;
+    }
+    return null;
+  }
+
   function renderSuggest() {
     const box = $('suggest');
     const raw = $('q').value.trim();
@@ -563,8 +628,19 @@
     }
     aps.sort((x, y) => x.s - y.s || y.total - x.total || x.a.key.localeCompare(y.a.key));
 
-    const fls = [];
-    if (q) {
+    const pair = q ? parsePair(q) : null;
+    const pairRows = [], fls = [];
+    if (pair) {
+      const f = { ...pair, dir: 'both' };
+      for (const p of planes.values()) if (matchFilter(p.d, f, 'both')) fls.push({ d: p.d, s: 1 });
+      // Code: the airport's name. City/name: the airport codes it covers, e.g. "LHR, LGW".
+      const sideDesc = s => s.code ? (sideTitle(s) || s.label)
+        : [...airportInfo.values()].filter(a => sideHas(s, a.key)).map(a => a.iata || a.icao).join(', ');
+      const names = [pair.a, pair.b].map(sideDesc).join(' ⇄ ');
+      pairRows.push({ item: { pair }, html: `<b>${esc(pair.a.label)} ⇄ ${esc(pair.b.label)}</b>`
+        + `<span class="n">${esc(names)}</span>`
+        + `<span class="c">${fls.length ? `${fls.length} flight${fls.length === 1 ? '' : 's'}` : 'none in view'}</span>` });
+    } else if (q) {
       for (const p of planes.values()) {
         const s = scoreFlight(p.d, q.replace(/\s+/g, ''), qn);
         if (s >= 0) fls.push({ d: p.d, s });
@@ -585,6 +661,7 @@
 
     const sections = [['Airports in view', apRows], ['Flights', flRows]];
     if (fls.length && fls[0].s === 0) sections.reverse();   // an exact flight match goes first
+    if (pairRows.length) sections.unshift(['Between', pairRows]);
 
     sgItems = [];
     let html = '';
@@ -616,7 +693,8 @@
     $('q').value = '';
     closeSuggest();
     $('q').blur();
-    if (item.ap) setFilter(item.ap, 'all');
+    if (item.ap) setFilter({ a: codeSide(item.ap), b: null, dir: 'all' });
+    else if (item.pair) setFilter({ ...item.pair, dir: 'both' });
     else {
       const p = planes.get(item.id);
       if (p) { map.setView(p.m.getLatLng(), Math.max(map.getZoom(), 9)); select(item.id); }
