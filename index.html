@@ -626,7 +626,8 @@
     return h ? `${h} h ${m % 60} min` : `${m} min`;
   }
   const apLabel = a => a ? (a.code_iata || a.code_icao || a.code || '') : '';
-  const fIdent = f => f.ident_iata || f.ident || '';
+  // Flight number as passengers know it: BA2702 rather than FlightAware's operator code (EFW2702 / AO2702)
+  const fIdent = f => flightInfo((f.ident_icao || f.ident || '').toUpperCase()).flightNo || f.ident_iata || f.ident || '';
 
   // One-line state of a flight + colour
   function flightState(f) {
@@ -658,19 +659,28 @@
       ${where ? `<div class="s">${esc(where)}</div>` : ''}</div>`;
   }
 
-  // Where the aircraft for our flight is now, and whether it will make it in time
-  function inboundHtml(f, k) {
+  // Where the aircraft for our flight is now (c = its current/last flight), the flight that
+  // brings it to us (k = inbound), and whether it will make it in time
+  const landed = x => !!(x && (x.actual_in || x.actual_on));
+  const flying = x => !!(x && (x.actual_off || x.actual_out) && !landed(x));
+  function legText(x) {
+    const route = `${apLabel(x.origin)} → ${apLabel(x.destination)}`;
+    if (x.cancelled) return `${fIdent(x)} ${route} is cancelled.`;
+    if (landed(x)) return `Landed in ${x.destination?.city || apLabel(x.destination)} at ${fmtTime(x.actual_in || x.actual_on, x.destination?.timezone)} on ${fIdent(x)} from ${apLabel(x.origin)}.`;
+    if (flying(x)) return `In the air on ${fIdent(x)} ${route}, lands ${fmtTime(x.estimated_in || x.estimated_on || x.scheduled_in, x.destination?.timezone)}.`;
+    return `${fIdent(x)} ${route}: departs ${fmtTime(x.estimated_out || x.scheduled_out, x.origin?.timezone)}, lands ${fmtTime(x.estimated_in || x.scheduled_in, x.destination?.timezone)}.`;
+  }
+  function inboundHtml(f, k, c) {
     if (f.actual_out || f.actual_off || f.cancelled) return '';
     if (!f.registration) return `<div class="inb"><div class="k">Aircraft</div>Not assigned yet. Airlines often assign it on the day.</div>`;
-    if (!k) return '';
-    const route = `${apLabel(k.origin)} → ${apLabel(k.destination)}`;
-    let where;
-    if (k.cancelled) where = `Its flight ${esc(fIdent(k))} (${esc(route)}) is cancelled.`;
-    else if (k.actual_in || k.actual_on) where = `Arrived from ${esc(apLabel(k.origin))} at ${esc(fmtTime(k.actual_in || k.actual_on, k.destination?.timezone))} on ${esc(fIdent(k))}.`;
-    else if (k.actual_off || k.actual_out) where = `Flying ${esc(fIdent(k))} ${esc(route)}, lands ${esc(fmtTime(k.estimated_in || k.estimated_on || k.scheduled_in, k.destination?.timezone))}.`;
-    else where = `Will first fly ${esc(fIdent(k))} ${esc(route)}, departing ${esc(fmtTime(k.estimated_out || k.scheduled_out, k.origin?.timezone))}.`;
+    if (!k && !c) return '';
+    const lines = [];
+    if (c) lines.push(`<div>${esc(legText(c))}</div>`);
+    if (k && (!c || k.fa_flight_id !== c.fa_flight_id)) lines.push(`<div>Next: ${esc(legText(k))}</div>`);
+    const where = lines.join('');
 
     let verdict = '';
+    if (!k) return `<div class="inb"><div class="k">Your aircraft now · ${esc(f.registration)}</div>${where}</div>`;
     const arrive = Date.parse(k.actual_in || k.actual_on || k.estimated_in || k.estimated_on || k.scheduled_in || 0);
     const dep = Date.parse(f.scheduled_out || 0);
     if (arrive && dep && !k.cancelled) {
@@ -705,20 +715,23 @@
       + `<div class="state ${cls}">${esc(state)}${f.status ? `<small>${esc(f.status)}</small>` : ''}</div>`
       + `<div class="legs">${legHtml('Departure', f.origin, f.actual_out, f.estimated_out, f.scheduled_out, f.gate_origin, f.terminal_origin)}`
       + `${legHtml('Arrival', f.destination, f.actual_in, f.estimated_in, f.scheduled_in, f.gate_destination, f.terminal_destination)}</div>`
-      + (fsShow === index ? inboundHtml(f, inbound) : '');
+      + (fsShow === index ? inboundHtml(f, inbound, fsData.current) : '');
     const when = f.scheduled_out;
     $('fs-save').style.display = '';
     $('fs-save').textContent = trips.has(fIdent(f), when) ? '★ Saved' : '☆ Save';
     $('fs-show').style.display = showTarget() ? '' : 'none';
   }
 
-  // The aircraft worth showing: ours if it's flying, else the inbound one if that's flying or on the ground
+  // The aircraft worth showing: ours if it's flying, else wherever the assigned aircraft is now
+  // (in the air, or on the ground where its last flight landed)
   function showTarget() {
     if (!fsData || !fsData.flights) return null;
-    const f = fsData.flights[fsShow], k = fsShow === fsData.index ? fsData.inbound : null;
-    const flying = x => x && (x.actual_off || x.actual_out) && !(x.actual_on || x.actual_in);
+    const f = fsData.flights[fsShow];
     if (flying(f)) return f;
+    if (fsShow !== fsData.index) return null;
+    const k = fsData.inbound, c = fsData.current;
     if (flying(k)) return k;
+    if (c) return c;
     return null;
   }
   const regKey = r => (r || '').toUpperCase().replace(/-/g, '');
@@ -778,7 +791,7 @@
   $('fs-save').onclick = () => {
     const f = fsData?.flights?.[fsShow];
     if (!f) return;
-    trips.toggle({ ident: fIdent(f), when: f.scheduled_out, from: apLabel(f.origin), to: apLabel(f.destination), tz: f.origin?.timezone });
+    trips.toggle({ ident: fIdent(f), q: fsData.ident, when: f.scheduled_out, from: apLabel(f.origin), to: apLabel(f.destination), tz: f.origin?.timezone });
     renderFs();
   };
   $('fs-show').onclick = async () => {
@@ -918,7 +931,7 @@
     }
     // Saved flights when nothing is typed
     if (!q) {
-      const mine = trips.all().map(t => ({ item: { status: t.ident },
+      const mine = trips.all().map(t => ({ item: { status: t.q || t.ident },
         html: `<b>${esc(t.ident)}</b><span class="n">${esc(`${t.from} → ${t.to}`)}</span><span class="c">${esc(fmtTime(t.when, t.tz, true))}</span>` }));
       if (mine.length) sections.unshift(['My flights', mine]);
     }
