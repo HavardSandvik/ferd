@@ -75,6 +75,8 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sg .c { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .sg-empty { padding: 10px; color: var(--muted); font-size: 13px; }
+  .sg .rm { border: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 1;
+    padding: 0 2px 0 8px; cursor: pointer; align-self: center; }
 
   .filter { position: fixed; z-index: 1000; left: 12px; top: calc(env(safe-area-inset-top) + 70px);
     display: none; align-items: center; gap: 4px; padding: 4px 4px 4px 12px;
@@ -599,17 +601,21 @@
   const FS_REFRESH_MS = 180000;   // each refresh costs FlightAware credit, so not too often
   const isFlightNo = q => /^([A-Z]{2}|[A-Z]\d|\d[A-Z]|[A-Z]{3})\d{1,4}[A-Z]?$/.test(q);
 
+  // Saved flights. A flight has several numbers (BA2702, EFW2702, FlightAware's AO2702), so a saved
+  // entry matches a flight if any of them agree and the departure time is the same.
   const trips = {
     all() { return (store.get('ferd:trips') || []).filter(t => Date.parse(t.when) > Date.now() - 30 * 3600e3); },
-    has(ident, when) { return this.all().some(t => t.ident === ident && t.when === when); },
-    toggle(t) {
-      let list = this.all();
-      const i = list.findIndex(x => x.ident === t.ident && x.when === t.when);
-      if (i >= 0) list.splice(i, 1); else list.push(t);
-      list.sort((a, b) => Date.parse(a.when) - Date.parse(b.when));
-      store.set('ferd:trips', list);
-    }
+    save(list) { list.sort((a, b) => Date.parse(a.when) - Date.parse(b.when)); store.set('ferd:trips', list); },
+    same(t, names, when) { return t.when === when && [t.ident, t.q].some(n => n && names.includes(n)); },
+    has(names, when) { return this.all().some(t => this.same(t, names, when)); },
+    toggle(t, names) {
+      const list = this.all();
+      const rest = list.filter(x => !this.same(x, names, t.when));
+      this.save(rest.length < list.length ? rest : [...list, t]);
+    },
+    remove(i) { const list = this.all(); list.splice(i, 1); this.save(list); }
   };
+  const fNames = f => [fIdent(f), f.ident_iata, f.ident_icao, f.ident, fsData && fsData.ident].filter(Boolean);
 
   // Times in the airport's own time zone, with the day when it isn't today there
   function fmtTime(isoStr, tz, withDay) {
@@ -718,7 +724,7 @@
       + (fsShow === index ? inboundHtml(f, inbound, fsData.current) : '');
     const when = f.scheduled_out;
     $('fs-save').style.display = '';
-    $('fs-save').textContent = trips.has(fIdent(f), when) ? '★ Saved' : '☆ Save';
+    $('fs-save').textContent = trips.has(fNames(f), when) ? '★ Saved' : '☆ Save';
     $('fs-show').style.display = showTarget() ? '' : 'none';
   }
 
@@ -791,7 +797,7 @@
   $('fs-save').onclick = () => {
     const f = fsData?.flights?.[fsShow];
     if (!f) return;
-    trips.toggle({ ident: fIdent(f), q: fsData.ident, when: f.scheduled_out, from: apLabel(f.origin), to: apLabel(f.destination), tz: f.origin?.timezone });
+    trips.toggle({ ident: fIdent(f), q: f.ident_icao || f.ident || fsData.ident, when: f.scheduled_out, from: apLabel(f.origin), to: apLabel(f.destination), tz: f.origin?.timezone }, fNames(f));
     renderFs();
   };
   $('fs-show').onclick = async () => {
@@ -931,8 +937,9 @@
     }
     // Saved flights when nothing is typed
     if (!q) {
-      const mine = trips.all().map(t => ({ item: { status: t.q || t.ident },
-        html: `<b>${esc(t.ident)}</b><span class="n">${esc(`${t.from} → ${t.to}`)}</span><span class="c">${esc(fmtTime(t.when, t.tz, true))}</span>` }));
+      const mine = trips.all().map((t, i) => ({ item: { status: t.q || t.ident },
+        html: `<b>${esc(t.ident)}</b><span class="n">${esc(`${t.from} → ${t.to}`)}</span><span class="c">${esc(fmtTime(t.when, t.tz, true))}</span>`
+          + `<button class="rm" data-rm="${i}" aria-label="Remove ${esc(t.ident)}">×</button>` }));
       if (mine.length) sections.unshift(['My flights', mine]);
     }
 
@@ -994,6 +1001,8 @@
   // Keep the input focused while tapping a suggestion, then pick it.
   $('suggest').addEventListener('mousedown', e => e.preventDefault());
   $('suggest').addEventListener('click', e => {
+    const rm = e.target.closest('[data-rm]');
+    if (rm) { trips.remove(Number(rm.dataset.rm)); renderSuggest(); if (fsData) renderFs(); return; }
     const el = e.target.closest('.sg');
     if (el) pick(sgItems[Number(el.dataset.i)]);
   });
