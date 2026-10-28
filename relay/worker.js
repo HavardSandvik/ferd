@@ -166,10 +166,23 @@ async function flightStatus(ident, env, ctx) {
     const f = flights[index];
     // Where the aircraft is now: the flight that brings it in, while ours hasn't left yet.
     let inbound = null;
-    if (f.inbound_fa_id && !f.actual_out && !f.actual_off) {
+    if (!f.actual_out && !f.actual_off && !f.cancelled) {
       try {
-        const k = await aero(`/flights/${encodeURIComponent(f.inbound_fa_id)}?ident_type=fa_flight_id`, env);
-        if (k.flights && k.flights[0]) inbound = trimFlight(k.flights[0]);
+        if (f.inbound_fa_id) {
+          const k = await aero(`/flights/${encodeURIComponent(f.inbound_fa_id)}?ident_type=fa_flight_id`, env);
+          if (k.flights && k.flights[0]) inbound = trimFlight(k.flights[0]);
+        } else if (f.registration) {
+          // No inbound link: take the aircraft's last flight into our departure airport before we leave.
+          const dep = Date.parse(f.scheduled_out);
+          const q2 = new URLSearchParams({ ident_type: 'registration', start: iso(dep - 20 * 3600e3), end: iso(dep) });
+          const k = await aero(`/flights/${encodeURIComponent(f.registration.replace(/\s+/g, ''))}?${q2}`, env);
+          const at = a => a && (a.code_icao || a.code);
+          const prior = (k.flights || [])
+            .filter(x => x.fa_flight_id !== f.fa_flight_id && !x.cancelled && at(x.destination) === at(f.origin)
+              && Date.parse(x.scheduled_in || x.scheduled_on || 0) <= dep)
+            .sort((a, b) => Date.parse(b.scheduled_in || b.scheduled_on) - Date.parse(a.scheduled_in || a.scheduled_on));
+          if (prior[0]) inbound = trimFlight(prior[0]);
+        }
       } catch { /* inbound is a bonus; show the flight anyway */ }
     }
     return { flights, index, inbound };
