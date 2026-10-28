@@ -94,6 +94,24 @@
   .filter .close { font-size: 18px; padding: 0 8px; }
   .ac.dim .p { opacity: .16; }
 
+  body.fs-open #locate { display: none; }
+  #fs { max-height: calc(100vh - env(safe-area-inset-top) - 140px); overflow-y: auto; }
+  .days { display: flex; gap: 6px; margin-top: 10px; overflow-x: auto; }
+  .days button { border: 1px solid var(--line); background: transparent; color: var(--muted); font: inherit;
+    font-size: 12px; padding: 4px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+  .days button.on { background: var(--accent); border-color: transparent; color: #fff; }
+  .state { margin-top: 12px; font-weight: 700; font-size: 16px; }
+  .state small { font-weight: 400; color: var(--muted); font-size: 13px; margin-left: 6px; }
+  .good { color: #1f9d55; } .warn { color: #d98a00; } .bad { color: #d64545; }
+  @media (prefers-color-scheme: dark) { .good { color: #4cc38a; } .warn { color: #f0b429; } .bad { color: #f07070; } }
+  .legs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .leg .ap { font-weight: 700; } .leg .city { color: var(--muted); font-size: 13px; }
+  .leg .t { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .leg .s { color: var(--muted); font-size: 12px; }
+  .inb { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
+  .inb .k { margin-bottom: 4px; }
+  .inb .verdict { margin-top: 6px; font-weight: 600; }
+  .fs-msg { margin-top: 12px; color: var(--muted); font-size: 14px; }
   .path { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; margin-top: 6px; font-size: 14px; color: var(--muted); }
   .path .ap { border: 0; background: transparent; padding: 0; font: inherit; font-weight: 700;
     color: var(--accent); cursor: pointer; }
@@ -180,7 +198,21 @@
   </div>
   <div class="actions">
     <button class="btn" id="s-follow">Follow</button>
-    <a class="btn" id="s-route" target="_blank" rel="noopener">Route ↗</a>
+    <button class="btn" id="s-status">Status</button>
+    <a class="btn" id="s-route" target="_blank" rel="noopener">FlightAware ↗</a>
+  </div>
+</section>
+
+<section class="sheet hidden" id="fs" aria-live="polite">
+  <div class="sheet-head">
+    <div class="cs" id="fs-id">—</div>
+    <div class="sub" id="fs-sub"></div>
+    <button class="close" id="fs-close" aria-label="Close">×</button>
+  </div>
+  <div id="fs-body"></div>
+  <div class="actions">
+    <button class="btn" id="fs-save">☆ Save</button>
+    <button class="btn" id="fs-show">Show plane</button>
   </div>
 </section>
 
@@ -429,6 +461,11 @@
     if (selected) renderSheet();
     if (filter) renderFilter();
     if ($('suggest').classList.contains('open')) renderSuggest();
+    if (pendingFind) {   // "Show plane" moved the map here: select it once it shows up
+      const p = findPlane(pendingFind.t);
+      if (p) { pendingFind = null; select(p.d.id); }
+      else if (Date.now() > pendingFind.until) pendingFind = null;
+    }
   }
 
   function routesChanged() {
@@ -460,6 +497,7 @@
     if (prev && planes.has(prev)) { const q = planes.get(prev); setIconFor(q); q.m.setZIndexOffset(0); }
     const p = planes.get(id);
     if (!p) return;
+    if (fsData) closeFs();
     setIconFor(p);
     p.m.setZIndexOffset(1000);
     wantRoute(p.d.cs.toUpperCase(), true);
@@ -500,6 +538,7 @@
       ? `${d.vr > 0 ? '+' : ''}${Math.round(d.vr).toLocaleString()} fpm` : '—';
     $('s-sq').textContent = d.sq || '—';
     $('s-id').textContent = d.id.toUpperCase();
+    $('s-status').style.display = isAirlineCs(cs) ? '' : 'none';
     const route = $('s-route');
     if (d.cs) { route.href = `https://www.flightaware.com/live/flight/${encodeURIComponent(d.cs)}`; route.style.display = ''; }
     else route.style.display = 'none';
@@ -553,6 +592,213 @@
     if (dir && filter) { filter.dir = dir; renderFilter(); refreshIcons(); }
   });
   $('f-x').onclick = () => setFilter(null);
+
+  // ---------- flight status (FlightAware via the relay) ----------
+  // fsData = { ident, flights, index, inbound } for the open panel; fsShow = which flight is displayed
+  let fsData = null, fsShow = -1, fsTimer = null, pendingFind = null;
+  const FS_REFRESH_MS = 180000;   // each refresh costs FlightAware credit, so not too often
+  const isFlightNo = q => /^([A-Z]{2}|[A-Z]\d|\d[A-Z]|[A-Z]{3})\d{1,4}[A-Z]?$/.test(q);
+
+  const trips = {
+    all() { return (store.get('ferd:trips') || []).filter(t => Date.parse(t.when) > Date.now() - 30 * 3600e3); },
+    has(ident, when) { return this.all().some(t => t.ident === ident && t.when === when); },
+    toggle(t) {
+      let list = this.all();
+      const i = list.findIndex(x => x.ident === t.ident && x.when === t.when);
+      if (i >= 0) list.splice(i, 1); else list.push(t);
+      list.sort((a, b) => Date.parse(a.when) - Date.parse(b.when));
+      store.set('ferd:trips', list);
+    }
+  };
+
+  // Times in the airport's own time zone, with the day when it isn't today there
+  function fmtTime(isoStr, tz, withDay) {
+    if (!isoStr) return '—';
+    const d = new Date(isoStr), o = tz ? { timeZone: tz } : {};
+    const t = d.toLocaleTimeString([], { ...o, hour: '2-digit', minute: '2-digit' });
+    const day = x => x.toLocaleDateString('en-GB', { ...o, year: 'numeric', month: 'numeric', day: 'numeric' });
+    if (!withDay && day(d) === day(new Date())) return t;
+    return `${d.toLocaleDateString('en-GB', { ...o, weekday: 'short', day: 'numeric' })} ${t}`;
+  }
+  const mins = ms => Math.round(ms / 60000);
+  function dur(ms) {
+    const m = Math.abs(mins(ms)), h = Math.floor(m / 60);
+    return h ? `${h} h ${m % 60} min` : `${m} min`;
+  }
+  const apLabel = a => a ? (a.code_iata || a.code_icao || a.code || '') : '';
+  const fIdent = f => f.ident_iata || f.ident || '';
+
+  // One-line state of a flight + colour
+  function flightState(f) {
+    const now = Date.now();
+    if (f.cancelled) return ['Cancelled', 'bad'];
+    if (f.diverted) return ['Diverted', 'bad'];
+    const late = s => s >= 15 * 60 ? ` · ${dur(s * 1000)} late` : '';
+    if (f.actual_in || f.actual_on) return [`Landed${late(f.arrival_delay || 0)}`, (f.arrival_delay || 0) >= 15 * 60 ? 'warn' : 'good'];
+    if (f.actual_off || f.actual_out) {
+      const eta = f.estimated_in || f.estimated_on;
+      return [`${f.actual_off ? 'In the air' : 'Left the gate'}${eta ? ` · lands in ${dur(Date.parse(eta) - now)}` : ''}`,
+        (f.arrival_delay || 0) >= 15 * 60 ? 'warn' : 'good'];
+    }
+    const delay = f.departure_delay || 0;
+    if (delay >= 15 * 60) return [`Delayed ${dur(delay * 1000)}`, 'warn'];
+    const dep = Date.parse(f.estimated_out || f.scheduled_out);
+    return [dep > now ? `On time · departs in ${dur(dep - now)}` : 'On time', 'good'];
+  }
+
+  function legHtml(label, ap, act, est, sch, gate, term) {
+    const t = act || est || sch;
+    const kind = act ? (label === 'Departure' ? 'Departed' : 'Arrived') : est ? 'Expected' : 'Scheduled';
+    const diff = sch && t && Math.abs(Date.parse(t) - Date.parse(sch)) >= 60000;
+    const where = [term && `Terminal ${term}`, gate && `Gate ${gate}`].filter(Boolean).join(' · ');
+    return `<div class="leg"><div class="k">${label}</div>
+      <div><span class="ap">${esc(apLabel(ap))}</span> <span class="city">${esc(ap?.city || ap?.name || '')}</span></div>
+      <div class="t">${esc(fmtTime(t, ap?.timezone))}</div>
+      <div class="s">${kind}${diff ? ` · sched ${esc(fmtTime(sch, ap?.timezone))}` : ''}</div>
+      ${where ? `<div class="s">${esc(where)}</div>` : ''}</div>`;
+  }
+
+  // Where the aircraft for our flight is now, and whether it will make it in time
+  function inboundHtml(f, k) {
+    if (f.actual_out || f.actual_off || f.cancelled) return '';
+    if (!f.registration) return `<div class="inb"><div class="k">Aircraft</div>Not assigned yet. Airlines often assign it on the day.</div>`;
+    if (!k) return '';
+    const route = `${apLabel(k.origin)} → ${apLabel(k.destination)}`;
+    let where;
+    if (k.cancelled) where = `Its flight ${esc(fIdent(k))} (${esc(route)}) is cancelled.`;
+    else if (k.actual_in || k.actual_on) where = `Arrived from ${esc(apLabel(k.origin))} at ${esc(fmtTime(k.actual_in || k.actual_on, k.destination?.timezone))} on ${esc(fIdent(k))}.`;
+    else if (k.actual_off || k.actual_out) where = `Flying ${esc(fIdent(k))} ${esc(route)}, lands ${esc(fmtTime(k.estimated_in || k.estimated_on || k.scheduled_in, k.destination?.timezone))}.`;
+    else where = `Will first fly ${esc(fIdent(k))} ${esc(route)}, departing ${esc(fmtTime(k.estimated_out || k.scheduled_out, k.origin?.timezone))}.`;
+
+    let verdict = '';
+    const arrive = Date.parse(k.actual_in || k.actual_on || k.estimated_in || k.estimated_on || k.scheduled_in || 0);
+    const dep = Date.parse(f.scheduled_out || 0);
+    if (arrive && dep && !k.cancelled) {
+      const gap = dep - arrive;
+      if (k.actual_in || k.actual_on) verdict = `<div class="verdict good">The aircraft is already there.</div>`;
+      else if (gap < 0) verdict = `<div class="verdict bad">Due ${dur(-gap)} after your scheduled departure. Expect a delay.</div>`;
+      else if (gap < 35 * 60000) verdict = `<div class="verdict warn">Tight: due ${dur(gap)} before your scheduled departure.</div>`;
+      else verdict = `<div class="verdict good">Due ${dur(gap)} before your scheduled departure.</div>`;
+    }
+    return `<div class="inb"><div class="k">Your aircraft now · ${esc(f.registration)}</div>${where}${verdict}</div>`;
+  }
+
+  function renderFs() {
+    if (!fsData) return;
+    const { flights, inbound, index } = fsData;
+    const body = $('fs-body');
+    if (fsData.error) {
+      $('fs-id').textContent = fsData.ident; $('fs-sub').textContent = '';
+      body.innerHTML = `<div class="fs-msg">${esc(fsData.error)}</div>`;
+      $('fs-save').style.display = $('fs-show').style.display = 'none';
+      return;
+    }
+    if (!flights) { body.innerHTML = '<div class="fs-msg">Looking up…</div>'; return; }
+    const f = flights[fsShow];
+    const al = flightInfo((f.ident_icao || f.ident || '').toUpperCase()).airline;
+    $('fs-id').textContent = fIdent(f);
+    $('fs-sub').textContent = [al, f.ident_icao && f.ident_icao !== fIdent(f) ? f.ident_icao : '', f.aircraft_type, f.registration].filter(Boolean).join(' · ');
+    const days = flights.length > 1 ? `<div class="days">${flights.map((x, i) =>
+      `<button data-i="${i}" class="${i === fsShow ? 'on' : ''}">${esc(fmtTime(x.scheduled_out, x.origin?.timezone, true))}</button>`).join('')}</div>` : '';
+    const [state, cls] = flightState(f);
+    body.innerHTML = days
+      + `<div class="state ${cls}">${esc(state)}${f.status ? `<small>${esc(f.status)}</small>` : ''}</div>`
+      + `<div class="legs">${legHtml('Departure', f.origin, f.actual_out, f.estimated_out, f.scheduled_out, f.gate_origin, f.terminal_origin)}`
+      + `${legHtml('Arrival', f.destination, f.actual_in, f.estimated_in, f.scheduled_in, f.gate_destination, f.terminal_destination)}</div>`
+      + (fsShow === index ? inboundHtml(f, inbound) : '');
+    const when = f.scheduled_out;
+    $('fs-save').style.display = '';
+    $('fs-save').textContent = trips.has(fIdent(f), when) ? '★ Saved' : '☆ Save';
+    $('fs-show').style.display = showTarget() ? '' : 'none';
+  }
+
+  // The aircraft worth showing: ours if it's flying, else the inbound one if that's flying or on the ground
+  function showTarget() {
+    if (!fsData || !fsData.flights) return null;
+    const f = fsData.flights[fsShow], k = fsShow === fsData.index ? fsData.inbound : null;
+    const flying = x => x && (x.actual_off || x.actual_out) && !(x.actual_on || x.actual_in);
+    if (flying(f)) return f;
+    if (flying(k)) return k;
+    return null;
+  }
+  const regKey = r => (r || '').toUpperCase().replace(/-/g, '');
+  function findPlane(t) {
+    const reg = regKey(t.registration), cs = (t.atc_ident || t.ident_icao || t.ident || '').toUpperCase();
+    for (const p of planes.values()) {
+      if ((reg && regKey(p.d.reg) === reg) || (cs && p.d.cs.toUpperCase() === cs)) return p;
+    }
+    return null;
+  }
+
+  async function loadFs(ident, keepShow) {
+    clearTimeout(fsTimer);
+    try {
+      const r = await fetch(`${RELAY}/flight?ident=${encodeURIComponent(ident)}`, { signal: AbortSignal.timeout(20000) });
+      const j = await r.json().catch(() => ({}));
+      if (!fsData || fsData.ident !== ident) return;   // panel closed or switched meanwhile
+      if (r.status === 503) fsData.error = 'Flight status isn’t set up yet: the FlightAware key is missing from the relay.';
+      else if (r.status === 404 || (r.ok && !(j.flights || []).length)) fsData.error = `No flight ${ident} found between yesterday and two days ahead.`;
+      else if (!r.ok) fsData.error = `Couldn’t get the status (${(j.detail || [r.status]).join(', ')}).`;
+      else {
+        const prevShown = fsData.flights && fsData.flights[fsShow]?.fa_flight_id;
+        Object.assign(fsData, j, { error: null });
+        const i = keepShow && prevShown ? j.flights.findIndex(x => x.fa_flight_id === prevShown) : -1;
+        fsShow = i >= 0 ? i : j.index;
+      }
+    } catch (e) {
+      if (!fsData || fsData.ident !== ident) return;
+      if (!fsData.flights) fsData.error = 'Couldn’t reach the relay. Try again in a moment.';
+    }
+    renderFs();
+    if (fsData && !fsData.error) fsTimer = setTimeout(() => !document.hidden && fsData && loadFs(ident, true), FS_REFRESH_MS);
+  }
+
+  function openFs(ident) {
+    ident = ident.toUpperCase().replace(/\s+/g, '');
+    deselect();
+    fsData = { ident }; fsShow = -1;
+    $('fs-id').textContent = ident; $('fs-sub').textContent = '';
+    $('fs-save').style.display = $('fs-show').style.display = 'none';
+    renderFs();
+    $('fs').classList.remove('hidden');
+    document.body.classList.add('fs-open');
+    loadFs(ident);
+  }
+  function closeFs() {
+    clearTimeout(fsTimer);
+    fsData = null;
+    $('fs').classList.add('hidden');
+    document.body.classList.remove('fs-open');
+  }
+  $('fs-close').onclick = closeFs;
+  $('fs-body').addEventListener('click', e => {
+    const b = e.target.closest('.days button');
+    if (b) { fsShow = Number(b.dataset.i); renderFs(); }
+  });
+  $('fs-save').onclick = () => {
+    const f = fsData?.flights?.[fsShow];
+    if (!f) return;
+    trips.toggle({ ident: fIdent(f), when: f.scheduled_out, from: apLabel(f.origin), to: apLabel(f.destination), tz: f.origin?.timezone });
+    renderFs();
+  };
+  $('fs-show').onclick = async () => {
+    const t = showTarget();
+    if (!t) return;
+    const p = findPlane(t);
+    if (p) { closeFs(); map.setView(p.m.getLatLng(), Math.max(map.getZoom(), 8)); select(p.d.id); return; }
+    try {
+      const r = await fetch(`${RELAY}/position?id=${encodeURIComponent(t.fa_flight_id)}`, { signal: AbortSignal.timeout(15000) });
+      const j = await r.json();
+      if (!j.position) throw new Error('no position');
+      pendingFind = { t, until: Date.now() + 60000 };
+      closeFs();
+      map.setView([j.position.latitude, j.position.longitude], 8);   // moveend loads that area
+    } catch { setStatus('Plane position not available right now'); }
+  };
+  $('s-status').onclick = () => {
+    const d = planes.get(selected)?.d;
+    if (d) openFs(d.flightNo || d.cs);
+  };
 
   // ---------- search + suggestions ----------
   let sgItems = [], sgIdx = 0;
@@ -663,6 +909,20 @@
     if (fls.length && fls[0].s === 0) sections.reverse();   // an exact flight match goes first
     if (pairRows.length) sections.unshift(['Between', pairRows]);
 
+    // Flight status lookup for anything shaped like a flight number (DY1306, NOZ1306)
+    const fq = q.replace(/\s+/g, '').replace(/^([A-Z0-9]{2})0+(?=\d)/, '$1');
+    if (!pair && isFlightNo(fq)) {
+      const row = { item: { status: fq }, html: `<b>${esc(fq)}</b><span class="n">Status, times and where the aircraft is</span>` };
+      const inView = fls.length && fls[0].s === 0;
+      sections.splice(inView ? 1 : 0, 0, ['Flight status', [row]]);
+    }
+    // Saved flights when nothing is typed
+    if (!q) {
+      const mine = trips.all().map(t => ({ item: { status: t.ident },
+        html: `<b>${esc(t.ident)}</b><span class="n">${esc(`${t.from} → ${t.to}`)}</span><span class="c">${esc(fmtTime(t.when, t.tz, true))}</span>` }));
+      if (mine.length) sections.unshift(['My flights', mine]);
+    }
+
     sgItems = [];
     let html = '';
     for (const [title, rows] of sections) {
@@ -695,6 +955,7 @@
     $('q').blur();
     if (item.ap) setFilter({ a: codeSide(item.ap), b: null, dir: 'all' });
     else if (item.pair) setFilter({ ...item.pair, dir: 'both' });
+    else if (item.status) openFs(item.status);
     else {
       const p = planes.get(item.id);
       if (p) { map.setView(p.m.getLatLng(), Math.max(map.getZoom(), 9)); select(item.id); }

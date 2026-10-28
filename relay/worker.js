@@ -99,12 +99,118 @@ async function openSky(lat, lon, nm, env) {
   return (j.states || []).filter(s => s[5] != null && s[6] != null).map(fromOpenSky);
 }
 
+// ---------- flight status (FlightAware AeroAPI) ----------
+// Needs the Worker secret FLIGHTAWARE_API_KEY. Each AeroAPI call is billed (Personal tier:
+// $5/month free), so results are cached: flight status 2 min, positions 1 min.
+const AEROAPI = 'https://aeroapi.flightaware.com/aeroapi';
+const FLIGHT_FIELDS = [
+  'fa_flight_id', 'ident', 'ident_iata', 'ident_icao', 'atc_ident', 'operator', 'operator_iata',
+  'flight_number', 'registration', 'aircraft_type', 'status', 'cancelled', 'diverted', 'blocked',
+  'progress_percent', 'departure_delay', 'arrival_delay', 'inbound_fa_id', 'route_distance',
+  'scheduled_out', 'estimated_out', 'actual_out', 'scheduled_off', 'estimated_off', 'actual_off',
+  'scheduled_on', 'estimated_on', 'actual_on', 'scheduled_in', 'estimated_in', 'actual_in',
+  'gate_origin', 'gate_destination', 'terminal_origin', 'terminal_destination', 'baggage_claim',
+];
+const AIRPORT_FIELDS = ['code', 'code_iata', 'code_icao', 'name', 'city', 'timezone'];
+const pick = (o, keys) => o ? Object.fromEntries(keys.filter(k => o[k] !== undefined).map(k => [k, o[k]])) : null;
+const trimFlight = f => ({ ...pick(f, FLIGHT_FIELDS), origin: pick(f.origin, AIRPORT_FIELDS), destination: pick(f.destination, AIRPORT_FIELDS) });
+const iso = ms => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+
+async function aero(path, env) {
+  const r = await fetch(AEROAPI + path, {
+    headers: { 'x-apikey': env.FLIGHTAWARE_API_KEY, Accept: 'application/json' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) {
+    const e = new Error(`flightaware ${r.status}`);
+    e.status = r.status;
+    throw e;
+  }
+  return r.json();
+}
+
+// The flight to show: the first one that hasn't arrived and isn't long past, else the latest.
+function relevantIndex(flights) {
+  const now = Date.now();
+  const t = f => Date.parse(f.scheduled_out || f.scheduled_off || f.scheduled_in || 0);
+  const open = flights.map((f, i) => [f, i])
+    .filter(([f]) => !f.actual_in && !f.actual_on && !f.cancelled && t(f) > now - 18 * 3600e3)
+    .sort((a, b) => t(a[0]) - t(b[0]));
+  if (open.length) return open[0][1];
+  let best = 0;
+  flights.forEach((f, i) => { if (t(f) <= now + 3600e3 && t(f) > t(flights[best])) best = i; });
+  return best;
+}
+
+async function cached(key, ttl, ctx, make) {
+  const cache = caches.default;
+  const req = new Request(`https://ferd-relay.cache/${key}`);
+  const hit = await cache.match(req);
+  if (hit) return hit.json();
+  const val = await make();
+  ctx.waitUntil(cache.put(req, new Response(JSON.stringify(val), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}` } })));
+  return val;
+}
+
+// GET /flight?ident=DY1306  -> { flights: [...], index, inbound }
+async function flightStatus(ident, env, ctx) {
+  return cached(`flight/${ident}`, 120, ctx, async () => {
+    const now = Date.now();
+    const q = new URLSearchParams({ start: iso(now - 30 * 3600e3), end: iso(now + 47 * 3600e3) });
+    const j = await aero(`/flights/${encodeURIComponent(ident)}?${q}`, env);
+    const flights = (j.flights || []).map(trimFlight)
+      .sort((a, b) => Date.parse(a.scheduled_out || 0) - Date.parse(b.scheduled_out || 0));
+    if (!flights.length) return { flights: [], index: -1, inbound: null };
+    const index = relevantIndex(flights);
+    const f = flights[index];
+    // Where the aircraft is now: the flight that brings it in, while ours hasn't left yet.
+    let inbound = null;
+    if (f.inbound_fa_id && !f.actual_out && !f.actual_off) {
+      try {
+        const k = await aero(`/flights/${encodeURIComponent(f.inbound_fa_id)}?ident_type=fa_flight_id`, env);
+        if (k.flights && k.flights[0]) inbound = trimFlight(k.flights[0]);
+      } catch { /* inbound is a bonus; show the flight anyway */ }
+    }
+    return { flights, index, inbound };
+  });
+}
+
+// GET /position?id=<fa_flight_id>  -> last known position
+async function flightPosition(id, env, ctx) {
+  return cached(`pos/${id}`, 60, ctx, async () => {
+    const j = await aero(`/flights/${encodeURIComponent(id)}/position`, env);
+    const p = j.last_position || null;
+    return p ? pick(p, ['latitude', 'longitude', 'altitude', 'groundspeed', 'heading', 'timestamp', 'update_type']) : null;
+  });
+}
+
+async function handleFlight(url, env, ctx, origin) {
+  if (!env.FLIGHTAWARE_API_KEY) return json({ error: 'flight status not set up', detail: ['FLIGHTAWARE_API_KEY missing'] }, 503, origin);
+  try {
+    if (url.pathname === '/flight') {
+      const ident = (url.searchParams.get('ident') || '').toUpperCase().replace(/\s+/g, '');
+      if (!/^[A-Z0-9]{3,8}$/.test(ident)) return json({ error: 'bad flight number' }, 400, origin);
+      return json(await flightStatus(ident, env, ctx), 200, origin);
+    }
+    const id = url.searchParams.get('id') || '';
+    if (!/^[A-Za-z0-9\-]{6,60}$/.test(id)) return json({ error: 'bad id' }, 400, origin);
+    return json({ position: await flightPosition(id, env, ctx) }, 200, origin);
+  } catch (e) {
+    const s = e.status === 404 ? 404 : e.status === 429 ? 429 : 502;
+    return json({ error: e.status === 404 ? 'flight not found' : 'flight status failed', detail: [e.message] }, s, origin);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') || '';
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors(origin) });
 
     const url = new URL(request.url);
+    if (request.method === 'GET' && (url.pathname === '/flight' || url.pathname === '/position')) {
+      return handleFlight(url, env, ctx, origin);
+    }
     if (request.method !== 'GET' || url.pathname !== '/near') {
       return json({ error: 'not found' }, 404, origin);
     }
