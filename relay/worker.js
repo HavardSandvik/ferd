@@ -155,7 +155,7 @@ async function cached(key, ttl, ctx, make) {
 
 // GET /flight?ident=DY1306  -> { flights: [...], index, inbound }
 async function flightStatus(ident, env, ctx) {
-  return cached(`flight2/${ident}`, 120, ctx, async () => {
+  return cached(`flight3/${ident}`, 120, ctx, async () => {
     const now = Date.now();
     const q = new URLSearchParams({ start: iso(now - 30 * 3600e3), end: iso(now + 47 * 3600e3) });
     const j = await aero(`/flights/${encodeURIComponent(ident)}?${q}`, env);
@@ -186,8 +186,35 @@ async function flightStatus(ident, env, ctx) {
         aircraftNote = e.message;
       }
     }
-    return { flights, index, inbound, current, aircraftNote };
+    // No aircraft known yet: educated guess from the paired flight. Airlines often fly a route
+    // as neighbouring numbers (DY1318 BGO->LGW, then DY1319 LGW->BGO), so look for the
+    // number one below/above flying the reverse route into our airport shortly before we leave.
+    let likely = null;
+    const dep = Date.parse(f.estimated_out || f.scheduled_out || 0);
+    if (!f.registration && !f.actual_out && !f.actual_off && !f.cancelled && dep && dep - now < 24 * 3600e3) {
+      likely = await pairedInbound(f, dep, env).catch(() => null);
+    }
+    return { flights, index, inbound, current, likely, aircraftNote };
   });
+}
+
+async function pairedInbound(f, dep, env) {
+  const m = /^([A-Z]{3})(\d{1,4})$/.exec(f.ident_icao || f.ident || '');
+  if (!m) return null;
+  const at = a => a && (a.code_icao || a.code);
+  const tIn = x => Date.parse(x.actual_in || x.actual_on || x.estimated_in || x.estimated_on || x.scheduled_in || x.scheduled_on || 0);
+  const q = new URLSearchParams({ start: iso(dep - 14 * 3600e3), end: iso(dep) });
+  for (const n of [Number(m[2]) - 1, Number(m[2]) + 1]) {
+    if (n < 1) continue;
+    let j;
+    try { j = await aero(`/flights/${m[1]}${n}?${q}`, env); } catch { continue; }
+    const hit = (j.flights || [])
+      .filter(x => !x.cancelled && at(x.origin) === at(f.destination) && at(x.destination) === at(f.origin))
+      .filter(x => { const t = tIn(x); return t && t <= dep + 2 * 3600e3 && t >= dep - 10 * 3600e3; })
+      .sort((a, b) => tIn(b) - tIn(a))[0];
+    if (hit) return trimFlight(hit);
+  }
+  return null;
 }
 
 // GET /position?id=<fa_flight_id>  -> last known position

@@ -676,27 +676,32 @@
     if (flying(x)) return `In the air on ${fIdent(x)} ${route}, lands ${fmtTime(x.estimated_in || x.estimated_on || x.scheduled_in, x.destination?.timezone)}.`;
     return `${fIdent(x)} ${route}: departs ${fmtTime(x.estimated_out || x.scheduled_out, x.origin?.timezone)}, lands ${fmtTime(x.estimated_in || x.scheduled_in, x.destination?.timezone)}.`;
   }
-  function inboundHtml(f, k, c) {
+  // Will the incoming aircraft (k) be there in time for our scheduled departure?
+  function verdictHtml(f, k) {
+    const arrive = Date.parse(k.actual_in || k.actual_on || k.estimated_in || k.estimated_on || k.scheduled_in || 0);
+    const dep = Date.parse(f.scheduled_out || 0);
+    if (!arrive || !dep || k.cancelled) return '';
+    const gap = dep - arrive;
+    if (k.actual_in || k.actual_on) return `<div class="verdict good">The aircraft is already there.</div>`;
+    if (gap < 0) return `<div class="verdict bad">Due ${dur(-gap)} after your scheduled departure. Expect a delay.</div>`;
+    if (gap < 35 * 60000) return `<div class="verdict warn">Tight: due ${dur(gap)} before your scheduled departure.</div>`;
+    return `<div class="verdict good">Due ${dur(gap)} before your scheduled departure.</div>`;
+  }
+  function inboundHtml(f, k, c, likely) {
     if (f.actual_out || f.actual_off || f.cancelled) return '';
-    if (!f.registration) return `<div class="inb"><div class="k">Aircraft</div>Not assigned yet. Airlines often assign it on the day.</div>`;
+    if (!f.registration) {
+      if (!likely) return `<div class="inb"><div class="k">Aircraft</div>Not assigned yet. Airlines often assign it on the day.</div>`;
+      // Educated guess: the paired flight flying the reverse route into our airport
+      return `<div class="inb"><div class="k">Likely your aircraft${likely.registration ? ` · ${esc(likely.registration)}` : ''}</div>`
+        + `<div>${esc(legText(likely))}</div>${verdictHtml(f, likely)}`
+        + `<div class="s" style="margin-top:6px">Educated guess: ${esc(fIdent(likely))} is the paired flight on the reverse route. The airline hasn’t published the aircraft yet.</div></div>`;
+    }
     if (!k && !c) return '';
     const lines = [];
     if (c) lines.push(`<div>${esc(legText(c))}</div>`);
     if (k && (!c || k.fa_flight_id !== c.fa_flight_id)) lines.push(`<div>Next: ${esc(legText(k))}</div>`);
-    const where = lines.join('');
-
-    let verdict = '';
-    if (!k) return `<div class="inb"><div class="k">Your aircraft now · ${esc(f.registration)}</div>${where}</div>`;
-    const arrive = Date.parse(k.actual_in || k.actual_on || k.estimated_in || k.estimated_on || k.scheduled_in || 0);
-    const dep = Date.parse(f.scheduled_out || 0);
-    if (arrive && dep && !k.cancelled) {
-      const gap = dep - arrive;
-      if (k.actual_in || k.actual_on) verdict = `<div class="verdict good">The aircraft is already there.</div>`;
-      else if (gap < 0) verdict = `<div class="verdict bad">Due ${dur(-gap)} after your scheduled departure. Expect a delay.</div>`;
-      else if (gap < 35 * 60000) verdict = `<div class="verdict warn">Tight: due ${dur(gap)} before your scheduled departure.</div>`;
-      else verdict = `<div class="verdict good">Due ${dur(gap)} before your scheduled departure.</div>`;
-    }
-    return `<div class="inb"><div class="k">Your aircraft now · ${esc(f.registration)}</div>${where}${verdict}</div>`;
+    const head = `<div class="inb"><div class="k">Your aircraft now · ${esc(f.registration)}</div>`;
+    return head + lines.join('') + (k ? verdictHtml(f, k) : '') + '</div>';
   }
 
   function renderFs() {
@@ -721,7 +726,7 @@
       + `<div class="state ${cls}">${esc(state)}${f.status ? `<small>${esc(f.status)}</small>` : ''}</div>`
       + `<div class="legs">${legHtml('Departure', f.origin, f.actual_out, f.estimated_out, f.scheduled_out, f.gate_origin, f.terminal_origin)}`
       + `${legHtml('Arrival', f.destination, f.actual_in, f.estimated_in, f.scheduled_in, f.gate_destination, f.terminal_destination)}</div>`
-      + (fsShow === index ? inboundHtml(f, inbound, fsData.current) : '');
+      + (fsShow === index ? inboundHtml(f, inbound, fsData.current, fsData.likely) : '');
     const when = f.scheduled_out;
     $('fs-save').style.display = '';
     $('fs-save').textContent = trips.has(fNames(f), when) ? '★ Saved' : '☆ Save';
@@ -735,9 +740,10 @@
     const f = fsData.flights[fsShow];
     if (flying(f)) return f;
     if (fsShow !== fsData.index) return null;
-    const k = fsData.inbound, c = fsData.current;
+    const k = fsData.inbound, c = fsData.current, g = !f.registration ? fsData.likely : null;
     if (flying(k)) return k;
     if (c) return c;
+    if (g && (flying(g) || landed(g))) return g;
     return null;
   }
   const regKey = r => (r || '').toUpperCase().replace(/-/g, '');
